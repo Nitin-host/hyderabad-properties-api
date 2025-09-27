@@ -2,7 +2,7 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const { validationResult } = require('express-validator');
 const crypto = require('crypto');
-const { sendConfirmationEmail, sendOfficialCredentialsEmail, sendPasswordResetEmail } = require('../services/emailService');
+const { sendConfirmationEmail, sendOfficialCredentialsEmail, sendPasswordResetEmail, sendOtpEmail } = require('../services/emailService');
 
 // Generate JWT Token
 const generateToken = (id) => {
@@ -91,60 +91,90 @@ exports.register = async (req, res) => {
 // @route   POST /api/users/login
 // @access  Public
 exports.login = async (req, res) => {
+  const { email, password } = req.body;
+
+  // 🔑 Ensure password is fetched
+  const user = await User.findOne({ email }).select("+password");
+  if (!user) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid credentials" });
+  }
+
+  const isMatch = await user.matchPassword(password);
+  if (!isMatch) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid credentials" });
+  }
+
+  if (user.role === "super_admin") {
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    user.otp = otp;
+    user.otpExpiry = Date.now() + 10 * 60 * 1000;
+    await user.save();
+
+    await sendOtpEmail(user.email, user.name, otp);
+
+    return res.status(200).json({
+      success: true,
+      otpRequired: true,
+      message: "OTP sent to email. Please verify to complete login.",
+    });
+  }
+
+  // ✅ ensure JWT secret exists
+  if (!process.env.JWT_SECRET) {
+    console.error("JWT_SECRET is missing in environment");
+    return res
+      .status(500)
+      .json({ success: false, message: "Server config error" });
+  }
+
+  const token = generateToken(user._id);
+  const refreshToken = generateRefreshToken(user._id);
+  user.password = undefined;
+
+  res.status(200).json({
+    success: true,
+    message: "Login successful",
+    data: { user, token, refreshToken },
+  });
+};
+
+// @desc    Verify OTP for Super Admin
+// @route   POST /api/users/verify-otp
+// @access  Public
+exports.verifyOtp = async (req, res) => {
   try {
-    // Check for validation errors
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: errors.array()
-      });
+    const { email, otp } = req.body;
+
+    const user = await User.findOne({ email });
+    if (!user || user.role !== "super_admin") {
+      return res.status(400).json({ success: false, message: "Invalid request" });
     }
 
-    const { email, password } = req.body;
-
-    // Check if user exists and get password
-    const user = await User.findOne({ email }).select('+password');
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid credentials'
-      });
+    if (user.otp !== otp || user.otpExpiry < Date.now()) {
+      return res.status(400).json({ success: false, message: "Invalid or expired OTP" });
     }
 
-    // Check password
-    const isMatch = await user.matchPassword(password);
-    if (!isMatch) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid credentials'
-      });
-    }
+    // clear otp fields
+    user.otp = undefined;
+    user.otpExpiry = undefined;
+    await user.save();
 
-    // Generate tokens
     const token = generateToken(user._id);
     const refreshToken = generateRefreshToken(user._id);
-
-    // Remove password from response
     user.password = undefined;
 
     res.status(200).json({
       success: true,
-      message: 'Login successful',
-      data: {
-        user,
-        token,
-        refreshToken
-      }
+      message: "OTP verified, login successful",
+      data: { user, token, refreshToken }
     });
   } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error during login',
-      error: error.message
-    });
+    console.error("OTP verify error:", error);
+    res.status(500).json({ success: false, message: "Server error during OTP verification" });
   }
 };
 
@@ -358,7 +388,7 @@ exports.updateUserRole = async (req, res) => {
     const { id } = req.params;
 
     // Validate role
-    const validRoles = ['user', 'admin', 'super_admin'];
+    const validRoles = ['user', 'admin'];
     if (!validRoles.includes(role)) {
       return res.status(400).json({
         success: false,
