@@ -346,6 +346,96 @@ exports.sendPasswordResetEmail = async (email, name, resetToken) => {
   }
 };
 
+exports.sendOtpEmail = async (email, name, otp) => {
+  try {
+    const transporter = createTransporter();
+
+    const mailOptions = {
+      from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
+      to: email,
+      subject: "Your Hyderabad Properties Login OTP",
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Your OTP Code</title>
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              line-height: 1.6;
+              color: #333;
+              max-width: 600px;
+              margin: 0 auto;
+              padding: 20px;
+              background-color: #f8f9fa;
+            }
+            .header {
+              background-color: #2c3e50;
+              color: white;
+              padding: 20px;
+              text-align: center;
+              border-radius: 5px 5px 0 0;
+            }
+            .content {
+              background-color: white;
+              padding: 30px;
+              border-radius: 0 0 5px 5px;
+              text-align: center;
+            }
+            .otp {
+              display: inline-block;
+              background-color: #3498db;
+              color: white;
+              font-size: 24px;
+              font-weight: bold;
+              padding: 15px 30px;
+              border-radius: 8px;
+              margin: 20px 0;
+              letter-spacing: 5px;
+            }
+            .footer {
+              text-align: center;
+              margin-top: 20px;
+              font-size: 12px;
+              color: #666;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1>Hyderabad Properties Login Verification</h1>
+          </div>
+          <div class="content">
+            <h2>Hello ${name},</h2>
+            <p>Please use the following OTP to complete your login:</p>
+            
+            <div class="otp">${otp}</div>
+            
+            <p>This OTP is valid for <strong>10 minutes</strong>. 
+            Do not share it with anyone.</p>
+            
+            <p>If you didn’t request this login, please ignore this email.</p>
+          </div>
+          <div class="footer">
+            <p>© ${new Date().getFullYear()} Hyderabad Properties. All rights reserved.</p>
+          </div>
+        </body>
+        </html>
+      `,
+    };
+
+    const result = await transporter.sendMail(mailOptions);
+    console.log("OTP email sent successfully:", result.messageId);
+    return result;
+  } catch (error) {
+    console.error("Error sending OTP email:", error);
+    throw error;
+  }
+};
+
+
 // Test email configuration
 exports.testEmailConfig = async () => {
   try {

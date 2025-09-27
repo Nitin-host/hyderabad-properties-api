@@ -92,27 +92,28 @@ const validateCreateProperty = [
 
   body("brokerCharge")
     .optional()
-    .isNumeric()
-    .withMessage("Broker charge must be a number")
-    .isFloat({ min: 0 })
-    .withMessage("Broker charge must be a positive number")
-    .custom((value, { req }) => {
-      // If listedBy is Owner, broker charge must be 0
-      if (req.body.listedby === "Owner" && value !== 0) {
-        throw new Error("Broker charge must be 0 when listed by Owner");
-      }
-      return true;
-    }),
+    .isIn(["20 Days", "1 month", "no charge", "Contact for details"])
+    .withMessage("Invalid broker charge option"),
+  
+  body("totalFloors")
+    .optional()
+    .isInt({ min: 0 })
+    .withMessage("Total floors must be a positive integer"),
 
   body("bedrooms")
     .optional()
     .isIn(["1BHK", "2BHK", "3BHK", "4BHK"])
     .withMessage("Bedrooms must be 1BHK, 2BHK, 3BHK, or 4BHK"),
-  
+
   body("bathrooms")
     .optional()
     .isInt({ min: 0, max: 20 })
     .withMessage("Bathrooms must be a number between 0 and 20"),
+
+  body("balconies")
+    .optional()
+    .isIn([0, 1, 2, 3])
+    .withMessage("Balconies must be 0, 1, 2, or 3"),
 
   body("furnished")
     .optional()
@@ -227,10 +228,26 @@ const validateCreateProperty = [
     ])
     .withMessage("Invalid status"),
 
-  body("featured")
-    .optional()
-    .isBoolean()
-    .withMessage("Featured must be true or false"),
+  body("availability")
+    .notEmpty()
+    .withMessage("Availability is required")
+    .isIn(["immediate", "date"])
+    .withMessage("Availability must be either 'immediate' or 'date'"),
+
+  body("availabilityDate")
+    .if(body("availability").equals("date"))
+    .notEmpty()
+    .withMessage("Availability date is required when availability is 'date'")
+    .isISO8601()
+    .withMessage("Availability date must be a valid date")
+    .custom((value) => {
+      const today = new Date().setHours(0, 0, 0, 0);
+      const selectedDate = new Date(value).setHours(0, 0, 0, 0);
+      if (selectedDate < today) {
+        throw new Error("Availability date cannot be in the past");
+      }
+      return true;
+    }),
 
   handleValidationErrors,
 ];
@@ -255,6 +272,25 @@ const validateUpdateProperty = [
     .isString()
     .isLength({ min: 3, max: 500 })
     .withMessage("Location must be between 3 and 500 characters"),
+
+  body("maintenance")
+    .notEmpty()
+    .withMessage("Maintenance is required")
+    .isNumeric()
+    .withMessage("Maintenance must be a number")
+    .isFloat({ min: 0 })
+    .withMessage("Maintenance must be a positive number"),
+
+  body("listedBy")
+    .notEmpty()
+    .withMessage("Listed By is required")
+    .isIn(["owner", "agent"])
+    .withMessage("Listed By must be Owner or Agent"),
+
+  body("brokerCharge")
+    .optional()
+    .isIn(["20 Days", "1 month", "no charge", "Contact for details"])
+    .withMessage("Invalid broker charge option"),
 
   body("landmarks")
     .notEmpty()
@@ -293,6 +329,11 @@ const validateUpdateProperty = [
     .isFloat({ min: 0 })
     .withMessage("Size must be a positive number"),
 
+  body("totalFloors")
+    .optional()
+    .isInt({ min: 0 })
+    .withMessage("Total floors must be a positive integer"),
+
   body("bedrooms")
     .optional()
     .isIn(["1BHK", "2BHK", "3BHK", "4BHK"])
@@ -302,6 +343,11 @@ const validateUpdateProperty = [
     .optional()
     .isInt({ min: 0, max: 20 })
     .withMessage("Bathrooms must be a number between 0 and 20"),
+
+  body("balconies")
+    .optional()
+    .isIn([0, 1, 2, 3])
+    .withMessage("Balconies must be 0, 1, 2, or 3"),
 
   body("furnished")
     .optional()
@@ -409,17 +455,32 @@ const validateUpdateProperty = [
       "For Rent",
       "Sold",
       "Rented",
-      "rented",
       "Under Contract",
       "Available",
       "Occupied",
     ])
     .withMessage("Invalid status"),
 
-  body("featured")
+  body("availability")
     .optional()
-    .isBoolean()
-    .withMessage("Featured must be true or false"),
+    .isIn(["immediate", "date"])
+    .withMessage("Availability must be either 'immediate' or 'date'"),
+
+  body("availabilityDate")
+    .optional()
+    .if(body("availability").equals("date"))
+    .notEmpty()
+    .withMessage("Availability date is required when availability is 'date'")
+    .isISO8601()
+    .withMessage("Availability date must be a valid date")
+    .custom((value) => {
+      const today = new Date().setHours(0, 0, 0, 0);
+      const selectedDate = new Date(value).setHours(0, 0, 0, 0);
+      if (selectedDate < today) {
+        throw new Error("Availability date cannot be in the past");
+      }
+      return true;
+    }),
 
   handleValidationErrors,
 ];
@@ -437,109 +498,6 @@ const validateVideoIndex = [
   param('videoIndex')
     .isInt({ min: 0 })
     .withMessage('Video index must be a non-negative integer'),
-  handleValidationErrors
-];
-
-// Query parameters validation for property listing
-const validatePropertyQuery = [
-  query('page')
-    .optional()
-    .isInt({ min: 1 })
-    .withMessage('Page must be a positive integer'),
-
-  query('limit')
-    .optional()
-    .isInt({ min: 1, max: 100 })
-    .withMessage('Limit must be between 1 and 100'),
-
-  query('minPrice')
-    .optional()
-    .isNumeric()
-    .withMessage('Minimum price must be a number')
-    .isFloat({ min: 0 })
-    .withMessage('Minimum price must be positive'),
-
-  query('maxPrice')
-    .optional()
-    .isNumeric()
-    .withMessage('Maximum price must be a number')
-    .isFloat({ min: 0 })
-    .withMessage('Maximum price must be positive'),
-
-  query('minSize')
-    .optional()
-    .isNumeric()
-    .withMessage('Minimum size must be a number')
-    .isFloat({ min: 0 })
-    .withMessage('Minimum size must be positive'),
-
-  query('maxSize')
-    .optional()
-    .isNumeric()
-    .withMessage('Maximum size must be a number')
-    .isFloat({ min: 0 })
-    .withMessage('Maximum size must be positive'),
-
-  query('propertyType')
-    .optional()
-    .isIn(['Apartment', 'Villa', 'Independent House', 'Plot', 'Commercial', 'Office Space', 'Other'])
-    .withMessage('Invalid property type'),
-
-  query('status')
-    .optional()
-    .isIn(['For Sale', 'For Rent', 'Sold', 'Rented', 'rented', 'Under Contract', 'Available', 'Occupied'])
-    .withMessage('Invalid status'),
-
-  query('bedrooms')
-    .optional()
-    .isIn(['1BHK', '2BHK', '3BHK', '4BHK'])
-    .withMessage('Bedrooms must be 1BHK, 2BHK, 3BHK, or 4BHK'),
-
-  query('furnished')
-    .optional()
-    .isIn(['Fully Furnished', 'Semi Furnished', 'Unfurnished'])
-    .withMessage('Invalid furnished status'),
-
-  query('sortBy')
-    .optional()
-    .isIn(['price_asc', 'price_desc', 'size_asc', 'size_desc', 'newest', 'oldest'])
-    .withMessage('Invalid sort option'),
-
-  query('featured')
-    .optional()
-    .isBoolean()
-    .withMessage('Featured must be true or false'),
-
-  query('search')
-    .optional()
-    .trim()
-    .isLength({ min: 2, max: 100 })
-    .withMessage('Search query must be between 2 and 100 characters'),
-
-  query('city')
-    .optional()
-    .trim()
-    .isLength({ min: 2, max: 100 })
-    .withMessage('City must be between 2 and 100 characters'),
-
-  // Custom validation to ensure maxPrice >= minPrice
-  query().custom((value, { req }) => {
-    const { minPrice, maxPrice } = req.query;
-    if (minPrice && maxPrice && parseFloat(maxPrice) < parseFloat(minPrice)) {
-      throw new Error('Maximum price must be greater than or equal to minimum price');
-    }
-    return true;
-  }),
-
-  // Custom validation to ensure maxSize >= minSize
-  query().custom((value, { req }) => {
-    const { minSize, maxSize } = req.query;
-    if (minSize && maxSize && parseFloat(maxSize) < parseFloat(minSize)) {
-      throw new Error('Maximum size must be greater than or equal to minimum size');
-    }
-    return true;
-  }),
-
   handleValidationErrors
 ];
 
@@ -603,12 +561,28 @@ const validateVideoUpload = [
   handleValidationErrors
 ];
 
+const parseJsonFieldsMiddleware =
+  (fields = []) =>
+  (req, res, next) => {
+    fields.forEach((field) => {
+      if (req.body[field] && typeof req.body[field] === "string") {
+        try {
+          req.body[field] = JSON.parse(req.body[field]);
+        } catch (e) {
+          // Ignore parse errors; validation will catch invalid values
+        }
+      }
+    });
+    next();
+  };
+
+
 module.exports = {
   validateCreateProperty,
   validateUpdateProperty,
   validatePropertyId,
   validateVideoIndex,
-  validatePropertyQuery,
   validateVideoUpload,
-  handleValidationErrors
+  handleValidationErrors,
+  parseJsonFieldsMiddleware
 };
