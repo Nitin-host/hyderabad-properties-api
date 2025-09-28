@@ -13,27 +13,45 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// CORS middleware
-// app.use(cors({
-//   origin: process.env.CLIENT_URL || 'http://localhost:5173',
-//   credentials: true
-// }));
+// // CORS middleware
+// // app.use(cors({
+// //   origin: process.env.CLIENT_URL || 'http://localhost:5173',
+// //   credentials: true
+// // }));
+
+// app.use(
+//   cors({
+//     origin: (origin, callback) => {
+//       if (!origin) return callback(null, true); // allow requests like Postman
+
+//       // Allow all localhost ports
+//       if (/^http:\/\/localhost(:\d+)?$/.test(origin)) {
+//         return callback(null, true);
+//       }
+
+//       return callback(new Error("Not allowed by CORS"));
+//     },
+//     credentials: true,
+//   })
+// );
+const allowedOrigins = [
+  process.env.CLIENT_URL, // e.g. https://my-frontend.onrender.com
+  "http://localhost:5173", // local dev
+];
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin) return callback(null, true); // allow requests like Postman
-
-      // Allow all localhost ports
-      if (/^http:\/\/localhost(:\d+)?$/.test(origin)) {
+      if (!origin) return callback(null, true); // allow Postman or curl
+      if (allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
-
       return callback(new Error("Not allowed by CORS"));
     },
     credentials: true,
   })
 );
+
 
 // Connect to MongoDB
 const connectDB = async () => {
@@ -61,31 +79,6 @@ connectDB();
 app.use('/api/auth', require('./routes/userRoutes'));
 app.use('/api/properties', require('./routes/propertyRoutes'));
 app.use('/api', require('./routes/contact'))
-
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: 'Hyderabad Properties API is running',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
-  });
-});
-
-// Root endpoint
-app.get('/', (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: 'Welcome to Hyderabad Properties API',
-    version: '1.0.0',
-    documentation: '/api/docs',
-    endpoints: {
-      users: '/api/users',
-      properties: '/api/properties',
-      health: '/api/health'
-    }
-  });
-});
 
 // Global error handler
 app.use((err, req, res, next) => {
