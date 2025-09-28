@@ -38,27 +38,47 @@ const upload = multer({
 const getProperties = async (req, res) => {
   try {
     const filter = { isDeleted: false };
+    const properties = await Property.find(filter);
 
-    const properties = await Property.find(filter).populate(
-      "agent",
-      "name email phone"
-    );
+    // Try to fetch super_admin once
+    const superAdmin = await User.findOne({ role: "super_admin" });
 
-    // Generate presigned URLs safely
     const propertiesWithUrls = await Promise.all(
       properties.map(async (property) => {
         const images = await Promise.all(
           (property.images || [])
-            .filter((img) => img.key) // Only if key exists
+            .filter((img) => img.key)
             .map(async (img) => ({
               ...img.toObject(),
               presignUrl: img.key ? await getPresignedUrl(img.key) : null,
             }))
         );
 
+        const videos = await Promise.all(
+          (property.videos || [])
+            .filter((vid) => vid.key)
+            .map(async (vid) => ({
+              ...vid.toObject(),
+              presignUrl: vid.key ? await getPresignedUrl(vid.key) : null,
+              thumbnail: vid.thumbnailKey
+                ? await getPresignedUrl(vid.thumbnailKey)
+                : null,
+            }))
+        );
+
         return {
           ...property.toObject(),
+          agent: superAdmin
+            ? {
+                _id: superAdmin._id,
+                name: superAdmin.name,
+                email: superAdmin.email,
+                phone: superAdmin.phone,
+                role: superAdmin.role,
+              }
+            : {}, // send empty object if no super admin
           images,
+          videos,
         };
       })
     );
@@ -88,7 +108,7 @@ const getProperty = async (req, res) => {
     const property = await Property.findOne({
       _id: req.params.id,
       isDeleted: false,
-    }).populate("agent", "name email phone");
+    });
 
     if (!property) {
       return res.status(404).json({
@@ -97,12 +117,15 @@ const getProperty = async (req, res) => {
       });
     }
 
+    // Try to fetch super_admin
+    const superAdmin = await User.findOne({ role: "super_admin" });
+
     const images = await Promise.all(
       (property.images || [])
         .filter((img) => img.key)
         .map(async (img) => ({
           ...img.toObject(),
-          presignUrl: await getPresignedUrl(img.key),
+          presignUrl: img.key ? await getPresignedUrl(img.key) : null,
         }))
     );
 
@@ -112,7 +135,9 @@ const getProperty = async (req, res) => {
         .map(async (vid) => ({
           ...vid.toObject(),
           presignUrl: vid.key ? await getPresignedUrl(vid.key) : null,
-          thumbnail: vid.thumbnailKey ? await getPresignedUrl(vid.thumbnailKey) : null,
+          thumbnail: vid.thumbnailKey
+            ? await getPresignedUrl(vid.thumbnailKey)
+            : null,
         }))
     );
 
@@ -120,6 +145,15 @@ const getProperty = async (req, res) => {
       success: true,
       data: {
         ...property.toObject(),
+        agent: superAdmin
+          ? {
+              _id: superAdmin._id,
+              name: superAdmin.name,
+              email: superAdmin.email,
+              phone: superAdmin.phone,
+              role: superAdmin.role,
+            }
+          : {}, // send empty object if no super admin
         images,
         videos,
       },
@@ -141,10 +175,21 @@ const getProperty = async (req, res) => {
  */
 const createProperty = async (req, res) => {
   try {
+    // Fetch super_admin
+    const superAdmin = await User.findOne({ role: "super_admin" });
+    if (!superAdmin) {
+      return res.status(500).json({
+        success: false,
+        message: "Super admin user not found",
+      });
+    }
+
     const propertyData = {
       ...req.body,
-      agent: req.user.id,
+      agent: superAdmin._id, // always super_admin
     };
+
+    // Safely parse amenities if sent as string
     if (typeof propertyData.amenities === "string") {
       propertyData.amenities = JSON.parse(propertyData.amenities);
     }
@@ -160,7 +205,7 @@ const createProperty = async (req, res) => {
   } catch (error) {
     console.error("Create property error:", error);
     if (error.name === "ValidationError") {
-      const messages = Object.values(error.errors).map(err => err.message);
+      const messages = Object.values(error.errors).map((err) => err.message);
       return res.status(400).json({
         success: false,
         message: "Validation error",
@@ -181,7 +226,6 @@ function safeParseArray(bodyField, fieldName) {
   if (typeof bodyField === "string") {
     try {
       const parsed = JSON.parse(bodyField);
-      console.log(`[DEBUG] Parsed ${fieldName}:`, parsed);
       return Array.isArray(parsed) ? parsed : [];
     } catch (err) {
       console.error(`[ERROR] Invalid JSON in ${fieldName}:`, bodyField, err);
@@ -189,7 +233,6 @@ function safeParseArray(bodyField, fieldName) {
     }
   }
   if (Array.isArray(bodyField)) {
-    console.log(`[DEBUG] ${fieldName} is already array:`, bodyField);
     return bodyField;
   }
   console.warn(`[WARN] Unexpected type for ${fieldName}:`, typeof bodyField, bodyField);
@@ -201,7 +244,6 @@ function safeParseObject(bodyField, fieldName) {
   if (typeof bodyField === "string") {
     try {
       const parsed = JSON.parse(bodyField);
-      console.log(`[DEBUG] Parsed ${fieldName}:`, parsed);
       return typeof parsed === "object" && parsed !== null ? parsed : {};
     } catch (err) {
       console.error(`[ERROR] Invalid JSON in ${fieldName}:`, bodyField, err);
@@ -209,7 +251,6 @@ function safeParseObject(bodyField, fieldName) {
     }
   }
   if (typeof bodyField === "object") {
-    console.log(`[DEBUG] ${fieldName} is already object:`, bodyField);
     return bodyField;
   }
   console.warn(`[WARN] Unexpected type for ${fieldName}:`, typeof bodyField, bodyField);
@@ -230,19 +271,33 @@ const updateProperty = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Property not found" });
 
+    // Fetch super_admin
+    const superAdmin = await User.findOne({ role: "super_admin" });
+    if (!superAdmin) {
+      return res.status(500).json({
+        success: false,
+        message: "Super admin user not found",
+      });
+    }
+
+    // Always set agent to super_admin
+    property.agent = superAdmin._id;
+
     // Parse JSON fields safely
     const replaceMap = safeParseObject(req.body.replaceMap, "replaceMap");
-    const removedImages = safeParseArray(req.body.removedImages, "removedImages");
-    const removedVideos = safeParseArray(req.body.removedVideos, "removedVideos");
-
-    console.log("Parsed replaceMap:", replaceMap);
-    console.log("Parsed removedImages:", removedImages);
-    console.log("Parsed removedVideos:", removedVideos);
+    const removedImages = safeParseArray(
+      req.body.removedImages,
+      "removedImages"
+    );
+    const removedVideos = safeParseArray(
+      req.body.removedVideos,
+      "removedVideos"
+    );
 
     // 1️⃣ Remove old images/videos
     await handleRemovals(property, removedImages, removedVideos);
 
-    // 2️⃣ Handle replacements and get used files
+    // 2️⃣ Handle replacements
     const usedFiles = await handleReplacements(
       property,
       replaceMap,
@@ -250,7 +305,7 @@ const updateProperty = async (req, res) => {
       req.files.videos || []
     );
 
-    // 3️⃣ Handle newly uploaded files
+    // 3️⃣ Handle new uploads
     await handleNewUploads(
       property,
       req.files.images || [],
@@ -258,14 +313,14 @@ const updateProperty = async (req, res) => {
       usedFiles
     );
 
-    // 4️⃣ Update other property fields
+    // 4️⃣ Update other fields (except agent)
     const ignoredKeys = [
       "removedImages",
       "removedVideos",
       "replaceMap",
       "images",
       "videos",
-      "agent"
+      "agent",
     ];
     Object.keys(req.body).forEach((key) => {
       if (!ignoredKeys.includes(key)) property[key] = req.body[key];
