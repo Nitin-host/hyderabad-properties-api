@@ -2,7 +2,7 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const { validationResult } = require('express-validator');
 const crypto = require('crypto');
-const { sendConfirmationEmail, sendOfficialCredentialsEmail, sendPasswordResetEmail, sendOtpEmail } = require('../services/emailService');
+const { sendConfirmationEmail, sendOfficialCredentialsEmail, sendPasswordResetEmail, sendOtpEmail, sendNewUserDetailsToSuperAdmin } = require('../services/emailService');
 
 // Generate JWT Token
 const generateToken = (id) => {
@@ -63,6 +63,7 @@ exports.register = async (req, res) => {
     // Send confirmation email
     try {
       await sendConfirmationEmail(user.email, user.name);
+      await sendNewUserDetailsToSuperAdmin(user);
     } catch (emailError) {
       console.error('Failed to send confirmation email:', emailError);
       // Don't fail registration if email fails

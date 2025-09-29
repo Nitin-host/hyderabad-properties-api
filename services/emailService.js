@@ -23,14 +23,14 @@ exports.sendConfirmationEmail = async (email, name) => {
     const mailOptions = {
       from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
       to: email,
-      subject: 'Welcome to Hyderabad Properties - Registration Confirmation',
+      subject: 'Welcome to RR Properties - Registration Confirmation',
       html: `
         <!DOCTYPE html>
         <html>
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>Welcome to Hyderabad Properties</title>
+          <title>Welcome to RR Properties</title>
           <style>
             body {
               font-family: Arial, sans-serif;
@@ -71,11 +71,11 @@ exports.sendConfirmationEmail = async (email, name) => {
         </head>
         <body>
           <div class="header">
-            <h1>Welcome to Hyderabad Properties!</h1>
+            <h1>Welcome to RR Properties!</h1>
           </div>
           <div class="content">
             <h2>Hello ${name},</h2>
-            <p>Thank you for registering with Hyderabad Properties! We're excited to have you join our community of property enthusiasts.</p>
+            <p>Thank you for registering with RR Properties! We're excited to have you join our community of property enthusiasts.</p>
             
             <p>Your account has been successfully created and you can now:</p>
             <ul>
@@ -88,10 +88,10 @@ exports.sendConfirmationEmail = async (email, name) => {
             <p>If you have any questions or need assistance, please don't hesitate to contact our support team.</p>
             
             <p>Best regards,<br>
-            The Hyderabad Properties Team</p>
+            The RR Properties Team</p>
           </div>
           <div class="footer">
-            <p>© 2024 Hyderabad Properties. All rights reserved.</p>
+            <p>© 2024 RR Properties. All rights reserved.</p>
             <p>This is an automated email. Please do not reply to this message.</p>
           </div>
         </body>
@@ -104,6 +104,120 @@ exports.sendConfirmationEmail = async (email, name) => {
     return result;
   } catch (error) {
     console.error('Error sending confirmation email:', error);
+    throw error;
+  }
+};
+
+// Send new user registration details to super admin
+exports.sendNewUserDetailsToSuperAdmin = async (user) => {
+  try {
+    const transporter = createTransporter();
+    const superAdminEmail = process.env.SUPER_ADMIN_EMAIL;
+
+    if (!superAdminEmail) {
+      console.error("SUPER_ADMIN_EMAIL not configured in .env");
+      return;
+    }
+
+    const mailOptions = {
+      from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
+      to: superAdminEmail,
+      subject: "New User Registered - RR Properties",
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>New User Registered</title>
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              line-height: 1.6;
+              color: #333;
+              max-width: 600px;
+              margin: 0 auto;
+              padding: 20px;
+              background-color: #f8f9fa;
+            }
+            .header {
+              background-color: #2c3e50;
+              color: white;
+              padding: 20px;
+              text-align: center;
+              border-radius: 5px 5px 0 0;
+            }
+            .content {
+              background-color: white;
+              padding: 30px;
+              border-radius: 0 0 5px 5px;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              margin: 20px 0;
+            }
+            table th, table td {
+              padding: 12px 15px;
+              border: 1px solid #ddd;
+              text-align: left;
+            }
+            table th {
+              background-color: #f4f6f8;
+            }
+            .footer {
+              text-align: center;
+              margin-top: 20px;
+              font-size: 12px;
+              color: #666;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1>New User Registration Alert</h1>
+          </div>
+          <div class="content">
+            <h2>A new user has registered on RR Properties:</h2>
+            
+            <table>
+              <tr>
+                <th>Name</th>
+                <td>${user.name}</td>
+              </tr>
+              <tr>
+                <th>Email</th>
+                <td>${user.email}</td>
+              </tr>
+              <tr>
+                <th>Phone</th>
+                <td>${user.phone || "N/A"}</td>
+              </tr>
+              <tr>
+                <th>Role</th>
+                <td>${user.role}</td>
+              </tr>
+              <tr>
+                <th>Registered At</th>
+                <td>${new Date().toLocaleString()}</td>
+              </tr>
+            </table>
+
+            <p>Please review this user in the admin dashboard if required.</p>
+          </div>
+          <div class="footer">
+            <p>© ${new Date().getFullYear()} RR Properties. All rights reserved.</p>
+          </div>
+        </body>
+        </html>
+      `
+    };
+
+    const result = await transporter.sendMail(mailOptions);
+    console.log("Super admin notified about new user:", result.messageId);
+    return result;
+  } catch (error) {
+    console.error("Error sending new user details to super admin:", error);
     throw error;
   }
 };
@@ -122,7 +236,7 @@ exports.sendOfficialCredentialsEmail = async (email, name, tempPassword, role) =
     const mailOptions = {
       from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
       to: email,
-      subject: 'Your Hyderabad Properties Account - Login Credentials',
+      subject: 'Your RR Properties Account - Login Credentials',
       html: `
         <!DOCTYPE html>
         <html>
@@ -180,12 +294,12 @@ exports.sendOfficialCredentialsEmail = async (email, name, tempPassword, role) =
         </head>
         <body>
           <div class="header">
-            <h1>Hyderabad Properties</h1>
+            <h1>RR Properties</h1>
             <h2>Account Created Successfully</h2>
           </div>
           <div class="content">
             <h2>Hello ${name},</h2>
-            <p>An account has been created for you on the Hyderabad Properties platform by our administrator.</p>
+            <p>An account has been created for you on the RR Properties platform by our administrator.</p>
             
             <div class="credentials">
               <h3>Your Login Credentials:</h3>
@@ -208,7 +322,7 @@ exports.sendOfficialCredentialsEmail = async (email, name, tempPassword, role) =
             
             <p>To access your account:</p>
             <ol>
-              <li>Visit the Hyderabad Properties login page</li>
+              <li>Visit the RR Properties login page</li>
               <li>Use the email and temporary password provided above</li>
               <li>Change your password in your profile settings</li>
             </ol>
@@ -216,10 +330,10 @@ exports.sendOfficialCredentialsEmail = async (email, name, tempPassword, role) =
             <p>If you have any questions or need assistance, please contact our support team.</p>
             
             <p>Best regards,<br>
-            The Hyderabad Properties Team</p>
+            The RR Properties Team</p>
           </div>
           <div class="footer">
-            <p>© 2024 Hyderabad Properties. All rights reserved.</p>
+            <p>© 2024 RR Properties. All rights reserved.</p>
             <p>This email contains sensitive information. Please handle it securely.</p>
           </div>
         </body>
@@ -245,7 +359,7 @@ exports.sendPasswordResetEmail = async (email, name, resetToken) => {
     const mailOptions = {
       from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
       to: email,
-      subject: 'Password Reset Request - Hyderabad Properties',
+      subject: 'Password Reset Request - RR Properties',
       html: `
         <!DOCTYPE html>
         <html>
@@ -305,7 +419,7 @@ exports.sendPasswordResetEmail = async (email, name, resetToken) => {
           </div>
           <div class="content">
             <h2>Hello ${name},</h2>
-            <p>We received a request to reset your password for your Hyderabad Properties account.</p>
+            <p>We received a request to reset your password for your RR Properties account.</p>
             
             <p>Click the button below to reset your password:</p>
             <a href="${resetUrl}" class="button">Reset Password</a>
@@ -325,10 +439,10 @@ exports.sendPasswordResetEmail = async (email, name, resetToken) => {
             <p>If you have any questions, please contact our support team.</p>
             
             <p>Best regards,<br>
-            The Hyderabad Properties Team</p>
+            The RR Properties Team</p>
           </div>
           <div class="footer">
-            <p>© 2024 Hyderabad Properties. All rights reserved.</p>
+            <p>© 2024 RR Properties. All rights reserved.</p>
             <p>This is an automated email. Please do not reply to this message.</p>
           </div>
         </body>
@@ -352,7 +466,7 @@ exports.sendOtpEmail = async (email, name, otp) => {
     const mailOptions = {
       from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
       to: email,
-      subject: "Your Hyderabad Properties Login OTP",
+      subject: "Your RR Properties Login OTP",
       html: `
         <!DOCTYPE html>
         <html>
@@ -404,7 +518,7 @@ exports.sendOtpEmail = async (email, name, otp) => {
         </head>
         <body>
           <div class="header">
-            <h1>Hyderabad Properties Login Verification</h1>
+            <h1>RR Properties Login Verification</h1>
           </div>
           <div class="content">
             <h2>Hello ${name},</h2>
@@ -418,7 +532,7 @@ exports.sendOtpEmail = async (email, name, otp) => {
             <p>If you didn’t request this login, please ignore this email.</p>
           </div>
           <div class="footer">
-            <p>© ${new Date().getFullYear()} Hyderabad Properties. All rights reserved.</p>
+            <p>© ${new Date().getFullYear()} RR Properties. All rights reserved.</p>
           </div>
         </body>
         </html>
