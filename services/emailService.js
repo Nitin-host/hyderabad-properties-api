@@ -18,7 +18,7 @@ const sendEmail = async (to, subject, html) => {
       subject,
       htmlContent: html,
     });
-    console.log(`Email sent successfully to ${to}:`, response.messageId || response);
+    console.log(`Email sent successfully`);
     return response;
   } catch (error) {
     console.error(`Error sending email to ${to}:`, error);
@@ -495,19 +495,4 @@ exports.sendOtpEmail = async (email, name, otp) => {
         </html>
       `
   );
-};
-
-// Test email configuration
-exports.testEmailConfig = async () => {
-  try {
-    const response = await sendEmail(
-      process.env.SUPER_ADMIN_EMAIL || "yourtest@example.com",
-      "Test Email - RR Properties",
-      "<p>This is a test email to verify Brevo configuration is working.</p>"
-    );
-    return response;
-  } catch (err) {
-    console.error("Test email failed:", err);
-    throw err;
-  }
 };

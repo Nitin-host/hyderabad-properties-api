@@ -80,12 +80,6 @@ app.use('/api/auth', require('./routes/userRoutes'));
 app.use('/api/properties', require('./routes/propertyRoutes'));
 app.use('/api', require('./routes/contact'))
 
-
-app.get("/test-email", async (req, res) => {
-  const result = await testEmailConfig();
-  res.send(result ? "Email config valid ✅" : "Email config failed ❌");
-});
-
 // Global error handler
 app.use((err, req, res, next) => {
   console.error('Global error handler:', err);
