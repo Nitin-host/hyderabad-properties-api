@@ -14,7 +14,7 @@ const createTransporter = () => {
     tls: {
       rejectUnauthorized: false,
     },
-    debug: true, // Show debug output
+     debug: true,
   });
 };
 
