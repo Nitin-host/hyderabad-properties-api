@@ -3,13 +3,16 @@ const nodemailer = require('nodemailer');
 // Create transporter
 const createTransporter = () => {
   return nodemailer.createTransport({
-    service: "Gmail",
+    service: "gmail",
     auth: {
+      type: "OAuth2",
       user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
+      clientId: process.env.CLIENT_ID,
+      clientSecret: process.env.CLIENT_SECRET,
+      refreshToken: process.env.REFRESH_TOKEN,
     },
     tls: {
-      rejectUnauthorized: false, // Accept self-signed certificates (insecure!)
+      rejectUnauthorized: false,
     },
   });
 };
