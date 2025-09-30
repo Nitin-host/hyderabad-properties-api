@@ -1,7 +1,6 @@
 const Property = require('../models/Property');
 const {generateVideoThumbnail} = require('../services/generateVideoThumbnail');
 const User = require('../models/User');
-const videoCompressionService = require('../services/videoCompressionService');
 const {
   uploadBuffer,
   getPresignedUrl,

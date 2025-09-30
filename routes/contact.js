@@ -6,22 +6,22 @@ const nodemailer = require('nodemailer');
 // Create transporter
 const createTransporter = () => {
   return nodemailer.createTransport({
-    host: process.env.EMAIL_HOST,
-    port: process.env.EMAIL_PORT,
-    secure: process.env.EMAIL_SECURE === 'true', // true for 465, false for other ports
+    host: process.env.BREVO_SMTP_HOST || "smtp-relay.brevo.com",
+    port: Number(process.env.BREVO_SMTP_PORT) || 587,
+    secure: false,
     auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
+      user: process.env.BREVO_SMTP_USER,
+      pass: process.env.BREVO_SMTP_PASS,
     },
-     tls: {
-      rejectUnauthorized: false, // allow self-signed certificates
+    tls: {
+      rejectUnauthorized: false, // Accept self-signed certs
     },
   });
 };
 
 // Send confirmation email to user
 const sendUserEmail = async (email, name) => {
-  const transporter = createTransporter();
+  const transporter = await createTransporter();
 
   const mailOptions = {
     from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
@@ -48,7 +48,7 @@ const sendUserEmail = async (email, name) => {
 
 // Send notification email to super_admin
 const sendAdminEmail = async ({ name, email, phone, propertyType }) => {
-  const transporter = createTransporter();
+  const transporter = await createTransporter();
 
   const mailOptions = {
     from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
