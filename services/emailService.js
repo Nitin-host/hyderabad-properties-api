@@ -1,7 +1,19 @@
-const nodemailer = require('nodemailer');
+const { google } = require("googleapis");
+const nodemailer = require("nodemailer");
 
-// Create transporter
-const createTransporter = () => {
+const createTransporter = async () => {
+  const oAuth2Client = new google.auth.OAuth2(
+    process.env.CLIENT_ID,
+    process.env.CLIENT_SECRET,
+    "https://developers.google.com/oauthplayground"
+  );
+
+  oAuth2Client.setCredentials({
+    refresh_token: process.env.REFRESH_TOKEN,
+  });
+
+  const accessToken = await oAuth2Client.getAccessToken();
+
   return nodemailer.createTransport({
     service: "gmail",
     auth: {
@@ -10,23 +22,23 @@ const createTransporter = () => {
       clientId: process.env.CLIENT_ID,
       clientSecret: process.env.CLIENT_SECRET,
       refreshToken: process.env.REFRESH_TOKEN,
+      accessToken: accessToken.token,
     },
     tls: {
       rejectUnauthorized: false,
     },
-     debug: true,
   });
 };
 
 // Send confirmation email for user registration
 exports.sendConfirmationEmail = async (email, name) => {
   try {
-    const transporter = createTransporter();
+    const transporter = await createTransporter();
 
     const mailOptions = {
       from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
       to: email,
-      subject: 'Welcome to RR Properties - Registration Confirmation',
+      subject: "Welcome to RR Properties - Registration Confirmation",
       html: `
         <!DOCTYPE html>
         <html>
@@ -99,14 +111,14 @@ exports.sendConfirmationEmail = async (email, name) => {
           </div>
         </body>
         </html>
-      `
+      `,
     };
 
     const result = await transporter.sendMail(mailOptions);
-    console.log('Confirmation email sent successfully:', result.messageId);
+    console.log("Confirmation email sent successfully:", result.messageId);
     return result;
   } catch (error) {
-    console.error('Error sending confirmation email:', error);
+    console.error("Error sending confirmation email:", error);
     throw error;
   }
 };
@@ -114,7 +126,7 @@ exports.sendConfirmationEmail = async (email, name) => {
 // Send new user registration details to super admin
 exports.sendNewUserDetailsToSuperAdmin = async (user) => {
   try {
-    const transporter = createTransporter();
+    const transporter = await createTransporter();
     const superAdminEmail = process.env.SUPER_ADMIN_EMAIL;
 
     if (!superAdminEmail) {
@@ -213,7 +225,7 @@ exports.sendNewUserDetailsToSuperAdmin = async (user) => {
           </div>
         </body>
         </html>
-      `
+      `,
     };
 
     const result = await transporter.sendMail(mailOptions);
@@ -226,20 +238,25 @@ exports.sendNewUserDetailsToSuperAdmin = async (user) => {
 };
 
 // Send official credentials email when super_admin creates a user
-exports.sendOfficialCredentialsEmail = async (email, name, tempPassword, role) => {
+exports.sendOfficialCredentialsEmail = async (
+  email,
+  name,
+  tempPassword,
+  role
+) => {
   try {
-    const transporter = createTransporter();
+    const transporter = await createTransporter();
 
     const roleDescriptions = {
-      admin: 'Administrator - You have access to manage properties and users',
-      user: 'User - You can browse and manage your property listings',
-      super_admin: 'Super Administrator - You have full system access'
+      admin: "Administrator - You have access to manage properties and users",
+      user: "User - You can browse and manage your property listings",
+      super_admin: "Super Administrator - You have full system access",
     };
 
     const mailOptions = {
       from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
       to: email,
-      subject: 'Your RR Properties Account - Login Credentials',
+      subject: "Your RR Properties Account - Login Credentials",
       html: `
         <!DOCTYPE html>
         <html>
@@ -308,11 +325,13 @@ exports.sendOfficialCredentialsEmail = async (email, name, tempPassword, role) =
               <h3>Your Login Credentials:</h3>
               <div class="credential-item">Email: ${email}</div>
               <div class="credential-item">Temporary Password: ${tempPassword}</div>
-              <div class="credential-item">Role: ${role.charAt(0).toUpperCase() + role.slice(1)}</div>
+              <div class="credential-item">Role: ${
+                role.charAt(0).toUpperCase() + role.slice(1)
+              }</div>
             </div>
             
             <p><strong>Role Description:</strong><br>
-            ${roleDescriptions[role] || 'Standard user access'}</p>
+            ${roleDescriptions[role] || "Standard user access"}</p>
             
             <div class="warning">
               <strong>Important Security Notice:</strong>
@@ -341,14 +360,17 @@ exports.sendOfficialCredentialsEmail = async (email, name, tempPassword, role) =
           </div>
         </body>
         </html>
-      `
+      `,
     };
 
     const result = await transporter.sendMail(mailOptions);
-    console.log('Official credentials email sent successfully:', result.messageId);
+    console.log(
+      "Official credentials email sent successfully:",
+      result.messageId
+    );
     return result;
   } catch (error) {
-    console.error('Error sending official credentials email:', error);
+    console.error("Error sending official credentials email:", error);
     throw error;
   }
 };
@@ -356,13 +378,13 @@ exports.sendOfficialCredentialsEmail = async (email, name, tempPassword, role) =
 // Send password reset email
 exports.sendPasswordResetEmail = async (email, name, resetToken) => {
   try {
-    const transporter = createTransporter();
+    const transporter = await createTransporter();
     const resetUrl = `${process.env.CLIENT_URL}/reset-password/${resetToken}`;
 
     const mailOptions = {
       from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
       to: email,
-      subject: 'Password Reset Request - RR Properties',
+      subject: "Password Reset Request - RR Properties",
       html: `
         <!DOCTYPE html>
         <html>
@@ -450,21 +472,21 @@ exports.sendPasswordResetEmail = async (email, name, resetToken) => {
           </div>
         </body>
         </html>
-      `
+      `,
     };
 
     const result = await transporter.sendMail(mailOptions);
-    console.log('Password reset email sent successfully:', result.messageId);
+    console.log("Password reset email sent successfully:", result.messageId);
     return result;
   } catch (error) {
-    console.error('Error sending password reset email:', error);
+    console.error("Error sending password reset email:", error);
     throw error;
   }
 };
 
 exports.sendOtpEmail = async (email, name, otp) => {
   try {
-    const transporter = createTransporter();
+    const transporter = await createTransporter();
 
     const mailOptions = {
       from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
@@ -551,16 +573,15 @@ exports.sendOtpEmail = async (email, name, otp) => {
   }
 };
 
-
 // Test email configuration
 exports.testEmailConfig = async () => {
   try {
-    const transporter = createTransporter();
+    const transporter = await createTransporter();
     await transporter.verify();
-    console.log('Email configuration is valid');
+    console.log("Email configuration is valid");
     return true;
   } catch (error) {
-    console.error('Email configuration error:', error);
+    console.error("Email configuration error:", error);
     return false;
   }
 };
