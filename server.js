@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const mongoose = require('mongoose');
-const { testEmailConfig } = require('./services/emailService');
 
 // Load env vars
 dotenv.config();
@@ -58,14 +57,7 @@ const connectDB = async () => {
   try {
     const conn = await mongoose.connect(process.env.MONGO_URI);
     console.log(`MongoDB Connected: ${conn.connection.host}`);
-    
-    // Test email configuration on startup
-    const emailConfigValid = await testEmailConfig();
-    if (emailConfigValid) {
-      console.log('✅ Email service configured successfully');
-    } else {
-      console.log('⚠️  Email service configuration failed - emails will not be sent');
-    }
+  
   } catch (error) {
     console.error('Database connection error:', error);
     process.exit(1);
