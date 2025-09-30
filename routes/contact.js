@@ -1,33 +1,40 @@
 // backend/routes/contact.js
 const express = require('express');
 const router = express.Router();
-const nodemailer = require('nodemailer');
+const SibApiV3Sdk = require('@sendinblue/client');
 
-// Create transporter
-const createTransporter = () => {
-  return nodemailer.createTransport({
-    host: process.env.BREVO_SMTP_HOST || "smtp-relay.brevo.com",
-    port: Number(process.env.BREVO_SMTP_PORT) || 587,
-    secure: false,
-    auth: {
-      user: process.env.BREVO_SMTP_USER,
-      pass: process.env.BREVO_SMTP_PASS,
-    },
-    tls: {
-      rejectUnauthorized: false, // Accept self-signed certs
-    },
-  });
+const tranEmailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+tranEmailApi.setApiKey(
+  SibApiV3Sdk.TransactionalEmailsApiApiKeys.apiKey,
+  process.env.BREVO_API_KEY
+);
+
+// Generic send email helper
+const sendEmail = async (to, subject, html) => {
+  try {
+    const response = await tranEmailApi.sendTransacEmail({
+      sender: {
+        email: process.env.EMAIL_FROM,
+        name: process.env.EMAIL_FROM_NAME,
+      },
+      to: [{ email: to }],
+      subject,
+      htmlContent: html,
+    });
+    console.log(`✅ Email sent successfully to ${to}:`, response.messageId || response);
+    return response;
+  } catch (error) {
+    console.error(`❌ Error sending email to ${to}:`, error);
+    throw error;
+  }
 };
 
 // Send confirmation email to user
 const sendUserEmail = async (email, name) => {
-  const transporter = await createTransporter();
-
-  const mailOptions = {
-    from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
-    to: email,
-    subject: 'Thank you for contacting Hyderabad Properties',
-    html: `
+  return await sendEmail(
+    email,
+    'Thank you for contacting Hyderabad Properties',
+    `
       <!DOCTYPE html>
       <html>
       <head>
@@ -40,30 +47,23 @@ const sendUserEmail = async (email, name) => {
         <p>Best regards,<br>The Hyderabad Properties Team</p>
       </body>
       </html>
-    `,
-  };
-
-  await transporter.sendMail(mailOptions);
+    `
+  );
 };
 
 // Send notification email to super_admin
 const sendAdminEmail = async ({ name, email, phone, propertyType }) => {
-  const transporter = await createTransporter();
-
-  const mailOptions = {
-    from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
-    to: process.env.SUPER_ADMIN_EMAIL, // e.g., superadmin@example.com
-    subject: 'New Contact Form Submission',
-    html: `
+  return await sendEmail(
+    process.env.SUPER_ADMIN_EMAIL,
+    'New Contact Form Submission',
+    `
       <h2>New Contact Request</h2>
       <p><strong>Name:</strong> ${name}</p>
       <p><strong>Email:</strong> ${email}</p>
       <p><strong>Phone:</strong> ${phone}</p>
       <p><strong>Property Type:</strong> ${propertyType}</p>
-    `,
-  };
-
-  await transporter.sendMail(mailOptions);
+    `
+  );
 };
 
 // Contact form API

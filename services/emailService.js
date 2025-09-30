@@ -1,30 +1,37 @@
-const nodemailer = require("nodemailer");
+require('dotenv').config();
+const SibApiV3Sdk = require('@sendinblue/client');
 
-const createTransporter = () => {
-  return nodemailer.createTransport({
-    host: process.env.BREVO_SMTP_HOST || "smtp-relay.brevo.com",
-    port: Number(process.env.BREVO_SMTP_PORT) || 587,
-    secure: false,
-    auth: {
-      user: process.env.BREVO_SMTP_USER,
-      pass: process.env.BREVO_SMTP_PASS,
-    },
-    tls: {
-      rejectUnauthorized: false, // Accept self-signed certs
-    },
-  });
+const tranEmailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+tranEmailApi.setApiKey(
+  SibApiV3Sdk.TransactionalEmailsApiApiKeys.apiKey,
+  process.env.BREVO_API_KEY
+);
+
+const sendEmail = async (to, subject, html) => {
+  try {
+    const response = await tranEmailApi.sendTransacEmail({
+      sender: {
+        email: process.env.EMAIL_FROM,
+        name: process.env.EMAIL_FROM_NAME,
+      },
+      to: [{ email: to }],
+      subject,
+      htmlContent: html,
+    });
+    console.log(`Email sent successfully to ${to}:`, response.messageId || response);
+    return response;
+  } catch (error) {
+    console.error(`Error sending email to ${to}:`, error);
+    throw error;
+  }
 };
 
 // Send confirmation email for user registration
 exports.sendConfirmationEmail = async (email, name) => {
-  try {
-    const transporter = await createTransporter();
-
-    const mailOptions = {
-      from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
-      to: email,
-      subject: "Welcome to RR Properties - Registration Confirmation",
-      html: `
+  return await sendEmail(
+    email,
+    "Welcome to RR Properties - Registration Confirmation",
+    `
         <!DOCTYPE html>
         <html>
         <head>
@@ -96,35 +103,21 @@ exports.sendConfirmationEmail = async (email, name) => {
           </div>
         </body>
         </html>
-      `,
-    };
-
-    const result = await transporter.sendMail(mailOptions);
-    console.log("Confirmation email sent successfully:", result.messageId);
-    return result;
-  } catch (error) {
-    console.error("Error sending confirmation email:", error);
-    throw error;
-  }
+      `
+  );
 };
 
 // Send new user registration details to super admin
 exports.sendNewUserDetailsToSuperAdmin = async (user) => {
-  try {
-    const transporter = await createTransporter();
-    const superAdminEmail = process.env.SUPER_ADMIN_EMAIL;
-
-    if (!superAdminEmail) {
-      console.error("SUPER_ADMIN_EMAIL not configured in .env");
-      return;
-    }
-
-    const mailOptions = {
-      from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
-      to: superAdminEmail,
-      subject: "New User Registered - RR Properties",
-      html: `
-        <!DOCTYPE html>
+  const superAdminEmail = process.env.SUPER_ADMIN_EMAIL;
+  if (!superAdminEmail) {
+    console.error("SUPER_ADMIN_EMAIL not configured in .env");
+    return;
+  }
+  return await sendEmail(
+    superAdminEmail,
+    "New User Registered - RR Properties",
+    `<!DOCTYPE html>
         <html>
         <head>
           <meta charset="utf-8">
@@ -210,40 +203,22 @@ exports.sendNewUserDetailsToSuperAdmin = async (user) => {
           </div>
         </body>
         </html>
-      `,
-    };
-
-    const result = await transporter.sendMail(mailOptions);
-    console.log("Super admin notified about new user:", result.messageId);
-    return result;
-  } catch (error) {
-    console.error("Error sending new user details to super admin:", error);
-    throw error;
-  }
+      `
+  );
 };
 
 // Send official credentials email when super_admin creates a user
-exports.sendOfficialCredentialsEmail = async (
-  email,
-  name,
-  tempPassword,
-  role
-) => {
-  try {
-    const transporter = await createTransporter();
+exports.sendOfficialCredentialsEmail = async (email, name, tempPassword, role) => {
+  const roleDescriptions = {
+    admin: "Administrator - You have access to manage properties and users",
+    user: "User - You can browse and manage your property listings",
+    super_admin: "Super Administrator - You have full system access",
+  };
 
-    const roleDescriptions = {
-      admin: "Administrator - You have access to manage properties and users",
-      user: "User - You can browse and manage your property listings",
-      super_admin: "Super Administrator - You have full system access",
-    };
-
-    const mailOptions = {
-      from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
-      to: email,
-      subject: "Your RR Properties Account - Login Credentials",
-      html: `
-        <!DOCTYPE html>
+  return await sendEmail(
+    email,
+    "Your RR Properties Account - Login Credentials",
+    `<!DOCTYPE html>
         <html>
         <head>
           <meta charset="utf-8">
@@ -345,33 +320,17 @@ exports.sendOfficialCredentialsEmail = async (
           </div>
         </body>
         </html>
-      `,
-    };
-
-    const result = await transporter.sendMail(mailOptions);
-    console.log(
-      "Official credentials email sent successfully:",
-      result.messageId
-    );
-    return result;
-  } catch (error) {
-    console.error("Error sending official credentials email:", error);
-    throw error;
-  }
+      `
+  );
 };
 
 // Send password reset email
 exports.sendPasswordResetEmail = async (email, name, resetToken) => {
-  try {
-    const transporter = await createTransporter();
-    const resetUrl = `${process.env.CLIENT_URL}/reset-password/${resetToken}`;
-
-    const mailOptions = {
-      from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
-      to: email,
-      subject: "Password Reset Request - RR Properties",
-      html: `
-        <!DOCTYPE html>
+  const resetUrl = `${process.env.CLIENT_URL}/reset-password/${resetToken}`;
+  return await sendEmail(
+    email,
+    "Password Reset Request - RR Properties",
+    `<!DOCTYPE html>
         <html>
         <head>
           <meta charset="utf-8">
@@ -457,28 +416,16 @@ exports.sendPasswordResetEmail = async (email, name, resetToken) => {
           </div>
         </body>
         </html>
-      `,
-    };
-
-    const result = await transporter.sendMail(mailOptions);
-    console.log("Password reset email sent successfully:", result.messageId);
-    return result;
-  } catch (error) {
-    console.error("Error sending password reset email:", error);
-    throw error;
-  }
+      `
+  );
 };
 
+// Send OTP email
 exports.sendOtpEmail = async (email, name, otp) => {
-  try {
-    const transporter = await createTransporter();
-
-    const mailOptions = {
-      from: `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`,
-      to: email,
-      subject: "Your RR Properties Login OTP",
-      html: `
-        <!DOCTYPE html>
+  return await sendEmail(
+    email,
+    "Your RR Properties Login OTP",
+    `<!DOCTYPE html>
         <html>
         <head>
           <meta charset="utf-8">
@@ -546,27 +493,21 @@ exports.sendOtpEmail = async (email, name, otp) => {
           </div>
         </body>
         </html>
-      `,
-    };
-
-    const result = await transporter.sendMail(mailOptions);
-    console.log("OTP email sent successfully:", result.messageId);
-    return result;
-  } catch (error) {
-    console.error("Error sending OTP email:", error);
-    throw error;
-  }
+      `
+  );
 };
 
 // Test email configuration
 exports.testEmailConfig = async () => {
   try {
-    const transporter = await createTransporter();
-    await transporter.verify();
-    console.log("Email configuration is valid");
-    return true;
-  } catch (error) {
-    console.error("Email configuration error:", error);
-    return false;
+    const response = await sendEmail(
+      process.env.SUPER_ADMIN_EMAIL || "yourtest@example.com",
+      "Test Email - RR Properties",
+      "<p>This is a test email to verify Brevo configuration is working.</p>"
+    );
+    return response;
+  } catch (err) {
+    console.error("Test email failed:", err);
+    throw err;
   }
 };
