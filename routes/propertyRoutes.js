@@ -27,6 +27,65 @@ const { protect, authorize } = require('../middleware/auth');
  */
 router.get('/', getProperties);
 
+router.get(
+  "/deleted",
+  protect,
+  authorize("admin", "super_admin"),
+  async (req, res) => {
+    try {
+      const Property = require("../models/Property");
+      const { getPresignedUrl } = require("../services/r2Service");
+
+      // Fetch deleted properties
+      const properties = await Property.find({ isDeleted: true })
+        .populate("agent", "name email phone role")
+        .sort({ createdAt: -1 })
+        .lean();
+
+      // Add presigned URLs to images and videos for each property
+      const propertiesWithPresignedUrls = await Promise.all(
+        properties.map(async (property) => {
+          const images = await Promise.all(
+            (property.images || []).map(async (img) => ({
+              ...img,
+              presignUrl: img.key ? await getPresignedUrl(img.key) : null,
+            }))
+          );
+
+          const videos = await Promise.all(
+            (property.videos || []).map(async (vid) => ({
+              ...vid,
+              presignUrl: vid.key ? await getPresignedUrl(vid.key) : null,
+              thumbnail: vid.thumbnailKey
+                ? await getPresignedUrl(vid.thumbnailKey)
+                : null,
+            }))
+          );
+
+          return {
+            ...property,
+            images,
+            videos,
+          };
+        })
+      );
+
+      res.status(200).json({
+        success: true,
+        count: propertiesWithPresignedUrls.length,
+        data: propertiesWithPresignedUrls,
+      });
+    } catch (error) {
+      console.error("Get deleted properties error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch deleted properties",
+        error: error.message,
+      });
+    }
+  }
+);
+
 /**
  * @desc    Get single property by ID
  * @route   GET /api/properties/:id
@@ -148,45 +207,46 @@ router.get(
  * @access  Private (super_admin only)
  */
 router.delete(
-  '/admin/:id/permanent',
+  "/admin/:id/permanent",
   protect,
-  authorize('super_admin'),
+  authorize("super_admin"),
   validatePropertyId,
   async (req, res) => {
     try {
-      const Property = require('../models/Property');
-      const cloudinaryService = require('../services/cloudinaryService');
-      
+      const Property = require("../models/Property");
+      const r2Service = require("../services/r2Service"); // your R2 service
+
       const property = await Property.findById(req.params.id);
 
       if (!property) {
         return res.status(404).json({
           success: false,
-          message: 'Property not found'
+          message: "Property not found",
         });
       }
 
-      // Delete images from Cloudinary
+      // Delete images from R2
       if (property.images && property.images.length > 0) {
         for (const image of property.images) {
-          if (image.publicId) {
+          if (image.key) {
             try {
-              await cloudinaryService.deleteFile(image.publicId);
+              await r2Service.deleteFile(image.key);
             } catch (error) {
-              console.error(`Failed to delete image ${image.publicId}:`, error);
+              console.error(`Failed to delete image ${image.key}:`, error);
             }
           }
         }
       }
 
-      // Delete videos from Cloudinary
+      // Delete videos from R2
       if (property.videos && property.videos.length > 0) {
         for (const video of property.videos) {
-          if (video.publicId) {
+          if (video.key && video.thumbnailKey) {
             try {
-              await cloudinaryService.deleteFile(video.publicId);
+              await r2Service.deleteFile(video.key);
+              await r2Service.deleteFile(video.thumbnailKey);
             } catch (error) {
-              console.error(`Failed to delete video ${video.publicId}:`, error);
+              console.error(`Failed to delete video ${video.key}:`, error);
             }
           }
         }
@@ -197,14 +257,14 @@ router.delete(
 
       res.status(200).json({
         success: true,
-        message: 'Property permanently deleted successfully'
+        message: "Property permanently deleted successfully",
       });
     } catch (error) {
-      console.error('Permanent delete property error:', error);
+      console.error("Permanent delete property error:", error);
       res.status(500).json({
         success: false,
-        message: 'Failed to permanently delete property',
-        error: error.message
+        message: "Failed to permanently delete property",
+        error: error.message,
       });
     }
   }

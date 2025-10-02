@@ -1,19 +1,42 @@
-FROM node:20-alpine
+# Stage 1: Build dependencies
+FROM node:20-alpine AS deps
 
-# Create app directory inside container
+# Install build tools for native modules (needed by ffmpeg wrappers, mongoose, etc.)
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    ffmpeg \
+    bash
+
 WORKDIR /usr/src/app
 
-# Copy package.json and package-lock.json separately
+# Copy only package files to leverage Docker cache
 COPY package*.json ./
 
-# Update npm to latest stable version to avoid npm timeout issues
-RUN npm install -g npm@11.6.1 && npm cache clean --force && npm ci --only=production
+# Install production dependencies only
+RUN npm ci --only=production
 
-# Copy rest of the code
+# Stage 2: Final runtime
+FROM node:20-alpine
+
+WORKDIR /usr/src/app
+
+# Install ffmpeg & ffprobe for fluent-ffmpeg
+RUN apk add --no-cache ffmpeg bash
+
+# Copy production node_modules from deps stage
+COPY --from=deps /usr/src/app/node_modules ./node_modules
+
+# Copy rest of the app
 COPY . .
 
-# Expose port 5000 (should match your server.js code)
+# Create a non-root user for security
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+
+# Expose your API port
 EXPOSE 5000
 
-# Start the app by running server.js
+# Start your backend
 CMD ["node", "server.js"]
