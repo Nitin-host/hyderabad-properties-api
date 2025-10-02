@@ -98,7 +98,7 @@ exports.sendConfirmationEmail = async (email, name) => {
             The RR Properties Team</p>
           </div>
           <div class="footer">
-            <p>© 2024 RR Properties. All rights reserved.</p>
+            <p>© 2025 RR Properties. All rights reserved.</p>
             <p>This is an automated email. Please do not reply to this message.</p>
           </div>
         </body>
@@ -215,6 +215,8 @@ exports.sendOfficialCredentialsEmail = async (email, name, tempPassword, role) =
     super_admin: "Super Administrator - You have full system access",
   };
 
+  const loginUrl = `${process.env.CLIENT_URL}`;
+
   return await sendEmail(
     email,
     "Your RR Properties Account - Login Credentials",
@@ -255,6 +257,15 @@ exports.sendOfficialCredentialsEmail = async (email, name, tempPassword, role) =
             .credential-item {
               margin: 10px 0;
               font-weight: bold;
+            }
+            .button {
+              display: inline-block;
+              background-color: #2c3e50;
+              color: white;
+              padding: 12px 30px;
+              text-decoration: none;
+              border-radius: 5px;
+              margin: 20px 0;
             }
             .warning {
               background-color: #fff3cd;
@@ -304,10 +315,15 @@ exports.sendOfficialCredentialsEmail = async (email, name, tempPassword, role) =
             
             <p>To access your account:</p>
             <ol>
-              <li>Visit the RR Properties login page</li>
+              <li>Click the button below to visit the login page</li>
               <li>Use the email and temporary password provided above</li>
               <li>Change your password in your profile settings</li>
             </ol>
+            
+            <a href="${loginUrl}" class="button">Login to RR Properties</a>
+            
+            <p>Or copy and paste this link into your browser:</p>
+            <p style="word-break: break-all;">${loginUrl}</p>
             
             <p>If you have any questions or need assistance, please contact our support team.</p>
             
@@ -315,7 +331,7 @@ exports.sendOfficialCredentialsEmail = async (email, name, tempPassword, role) =
             The RR Properties Team</p>
           </div>
           <div class="footer">
-            <p>© 2024 RR Properties. All rights reserved.</p>
+            <p>© 2025 RR Properties. All rights reserved.</p>
             <p>This email contains sensitive information. Please handle it securely.</p>
           </div>
         </body>
@@ -411,7 +427,7 @@ exports.sendPasswordResetEmail = async (email, name, resetToken) => {
             The RR Properties Team</p>
           </div>
           <div class="footer">
-            <p>© 2024 RR Properties. All rights reserved.</p>
+            <p>© 2025 RR Properties. All rights reserved.</p>
             <p>This is an automated email. Please do not reply to this message.</p>
           </div>
         </body>
