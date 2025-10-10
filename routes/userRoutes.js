@@ -16,7 +16,8 @@ const {
   addToWishlist,
   removeFromWishlist,
   getWishlist,
-  verifyOtp
+  verifyAdminOtp,
+  verifyForgotOtp
 } = require('../controllers/userController');
 const {
   protect,
@@ -42,10 +43,11 @@ const router = express.Router();
 // Public routes
 router.post('/register', validateUserRegistration, register);
 router.post('/login', validateUserLogin, login);
-router.post('/verify-otp', verifyOtp)
+router.post('/verify-admin-otp', verifyAdminOtp);
 router.post('/refresh-token', validateRefreshToken, refreshToken);
 router.post('/forgot-password', validateForgotPassword, forgotPassword);
-router.put('/reset-password/:token', validatePasswordReset, resetPassword);
+router.post('/verify-forgot-otp', verifyForgotOtp);
+router.post('/reset-password', resetPassword);
 
 // Protected routes (require authentication)
 router.use(protect); // All routes below this middleware require authentication

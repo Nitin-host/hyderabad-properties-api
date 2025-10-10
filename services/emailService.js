@@ -512,3 +512,83 @@ exports.sendOtpEmail = async (email, name, otp) => {
       `
   );
 };
+
+// Send forgot password OTP email
+exports.sendForgotPasswordOtpEmail = async (email, name, otp) => {
+  return await sendEmail(
+    email,
+    "Reset Your RR Properties Account Password",
+    `<!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Password Reset OTP</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f4f6f8;
+          }
+          .header {
+            background-color: #c0392b; /* Red tone for alert/reset */
+            color: white;
+            padding: 20px;
+            text-align: center;
+            border-radius: 5px 5px 0 0;
+          }
+          .content {
+            background-color: white;
+            padding: 30px;
+            border-radius: 0 0 5px 5px;
+            text-align: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+          }
+          .otp {
+            display: inline-block;
+            background-color: #3498db;
+            color: white;
+            font-size: 24px;
+            font-weight: bold;
+            padding: 15px 30px;
+            border-radius: 8px;
+            margin: 20px 0;
+            letter-spacing: 5px;
+          }
+          .footer {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 12px;
+            color: #666;
+          }
+          p {
+            margin: 10px 0;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <h1>RR Properties - Password Reset</h1>
+        </div>
+        <div class="content">
+          <h2>Hello ${name},</h2>
+          <p>We received a request to reset your password for your <strong>RR Properties</strong> account.</p>
+          
+          <p>Use the OTP below to proceed with resetting your password:</p>
+          <div class="otp">${otp}</div>
+
+          <p>This OTP is valid for <strong>10 minutes</strong>. Please do not share it with anyone.</p>
+
+          <p>If you did not request a password reset, you can safely ignore this email — your account is still secure.</p>
+        </div>
+        <div class="footer">
+          <p>© ${new Date().getFullYear()} RR Properties. All rights reserved.</p>
+        </div>
+      </body>
+      </html>`
+  );
+};

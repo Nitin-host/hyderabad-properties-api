@@ -94,9 +94,9 @@ const validateCreateProperty = [
     .optional()
     .isIn(["20 Days", "1 month", "no charge", "Contact for details"])
     .withMessage("Invalid broker charge option"),
-  
+
   body("totalFloors")
-    .optional()
+    .optional({ checkFalsy: true })
     .isInt({ min: 0 })
     .withMessage("Total floors must be a positive integer"),
 
@@ -129,14 +129,14 @@ const validateCreateProperty = [
 
   // Optional fields validation
   body("securityDeposit")
-    .optional()
+    .optional({ checkFalsy: true })
     .isNumeric()
     .withMessage("Security deposit must be a number")
     .isFloat({ min: 0 })
     .withMessage("Security deposit must be a positive number"),
 
   body("flooring")
-    .optional()
+    .optional({ checkFalsy: true })
     .isIn([
       "Marble",
       "Tiles",
@@ -149,12 +149,12 @@ const validateCreateProperty = [
     .withMessage("Invalid flooring type"),
 
   body("overlooking")
-    .optional()
+    .optional({ checkFalsy: true })
     .isIn(["Main Road", "Garden", "Park", "Pool", "Club", "Other"])
     .withMessage("Invalid overlooking option"),
 
   body("ageOfConstruction")
-    .optional()
+    .optional({ checkFalsy: true })
     .isIn([
       "Newly Built",
       "Under Construction",
@@ -167,12 +167,12 @@ const validateCreateProperty = [
     .withMessage("Invalid age of construction"),
 
   body("additionalRooms")
-    .optional()
+    .optional({ checkFalsy: true })
     .isIn(["Puja Room", "Study Room", "Servant Room", "Store Room", "Other"])
     .withMessage("Invalid additional room"),
 
   body("waterAvailability")
-    .optional()
+    .optional({ checkFalsy: true })
     .isIn([
       "24 Hours Available",
       "12 Hours Available",
@@ -185,7 +185,7 @@ const validateCreateProperty = [
     .withMessage("Invalid water availability option"),
 
   body("statusOfElectricity")
-    .optional()
+    .optional({ checkFalsy: true })
     .isIn([
       "No/Rare Powercut",
       "Frequent Powercut",
@@ -196,7 +196,7 @@ const validateCreateProperty = [
     .withMessage("Invalid electricity status"),
 
   body("lift")
-    .optional()
+    .optional({ checkFalsy: true })
     .isInt({ min: 0 })
     .withMessage("Lift must be a number (0 or more)"),
 
@@ -330,7 +330,7 @@ const validateUpdateProperty = [
     .withMessage("Size must be a positive number"),
 
   body("totalFloors")
-    .optional()
+    .optional({ checkFalsy: true })
     .isInt({ min: 0 })
     .withMessage("Total floors must be a positive integer"),
 
@@ -383,12 +383,12 @@ const validateUpdateProperty = [
     .withMessage("Invalid flooring type"),
 
   body("overlooking")
-    .optional()
+    .optional({ checkFalsy: true })
     .isIn(["Main Road", "Garden", "Park", "Pool", "Club", "Other"])
     .withMessage("Invalid overlooking option"),
 
   body("ageOfConstruction")
-    .optional()
+    .optional({ checkFalsy: true })
     .isIn([
       "Newly Built",
       "Under Construction",
@@ -401,12 +401,12 @@ const validateUpdateProperty = [
     .withMessage("Invalid age of construction"),
 
   body("additionalRooms")
-    .optional()
+    .optional({ checkFalsy: true })
     .isIn(["Puja Room", "Study Room", "Servant Room", "Store Room", "Other"])
     .withMessage("Invalid additional room"),
 
   body("waterAvailability")
-    .optional()
+    .optional({ checkFalsy: true })
     .isIn([
       "24 Hours Available",
       "12 Hours Available",
@@ -419,7 +419,7 @@ const validateUpdateProperty = [
     .withMessage("Invalid water availability option"),
 
   body("statusOfElectricity")
-    .optional()
+    .optional({ checkFalsy: true })
     .isIn([
       "No/Rare Powercut",
       "Frequent Powercut",

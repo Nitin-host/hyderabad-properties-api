@@ -40,6 +40,14 @@ const UserSchema = new mongoose.Schema(
     otpExpiry: { type: Date },
     resetPasswordToken: String,
     resetPasswordExpire: Date,
+    tempPassword: String,
+    mustChangePassword: { type: Boolean, default: false },
+    isVerified: { type: Boolean, default: false },
+    avatar: String, 
+    failedLoginAttempts: { type: Number, default: 0 },
+    lockUntil: Date,
+    lastLogin: Date,
+    isActive: { type: Boolean, default: true },
     wishlist: [
       {
         type: mongoose.Schema.Types.ObjectId,
@@ -51,14 +59,26 @@ const UserSchema = new mongoose.Schema(
 );
 
 // Encrypt password using bcrypt
-UserSchema.pre('save', async function(next) {
-  if (!this.isModified('password')) {
-    next();
+UserSchema.pre("save", async function (next) {
+  if (this.isModified("password")) {
+    const salt = await bcrypt.genSalt(10);
+    this.password = await bcrypt.hash(this.password, salt);
   }
 
-  const salt = await bcrypt.genSalt(10);
-  this.password = await bcrypt.hash(this.password, salt);
+  if (this.isModified("tempPassword") && this.tempPassword) {
+    const salt = await bcrypt.genSalt(10);
+    this.tempPassword = await bcrypt.hash(this.tempPassword, salt);
+  }
+
+  next();
 });
+
+// Match tempPassword method
+UserSchema.methods.matchTempPassword = async function(enteredPassword) {
+  if (!this.tempPassword) return false;
+  return await bcrypt.compare(enteredPassword, this.tempPassword);
+};
+
 
 // Match user entered password to hashed password in database
 UserSchema.methods.matchPassword = async function(enteredPassword) {

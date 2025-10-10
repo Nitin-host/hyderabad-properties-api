@@ -2,11 +2,23 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const mongoose = require('mongoose');
+const compression = require('compression');
+// const apicache = require('apicache');
+const logger = require('./services/loggerService');
+const { apiLimiter, authLimiter } = require('./middleware/rateLimiter');
 
 // Load env vars
 dotenv.config();
 
 const app = express();
+
+// Compression middleware - reduce response size
+app.use(compression());
+
+// Setup cache middleware
+// const cache = apicache.middleware;
+// Cache successful GET requests for 30 seconds by default
+// const cacheSuccessfulResponses = cache('30 seconds', (req, res) => res.statusCode === 200);
 
 // Body parser middleware
 app.use(express.json({ limit: '10mb' }));
@@ -67,14 +79,45 @@ const connectDB = async () => {
 // Connect to database
 connectDB();
 
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'Server is running',
+    timestamp: new Date(),
+    environment: process.env.NODE_ENV || 'development',
+    uptime: process.uptime()
+  });
+});
+
+// Apply rate limiting to routes
+app.use('/api/auth', authLimiter); // Stricter rate limiting for auth routes
+app.use('/api', apiLimiter); // General rate limiting for all API routes
+
+// Apply caching to GET routes
+// app.use('/api/properties', (req, res, next) => {
+//   if (req.method === 'GET') {
+//     return cacheSuccessfulResponses(req, res, next);
+//   }
+//   next();
+// });
+
 // Routes
 app.use('/api/auth', require('./routes/userRoutes'));
 app.use('/api/properties', require('./routes/propertyRoutes'));
-app.use('/api', require('./routes/contact'))
+app.use('/api', require('./routes/contact'));
 
 // Global error handler
 app.use((err, req, res, next) => {
-  console.error('Global error handler:', err);
+  logger.error(`${err.name}: ${err.message}`, { 
+    path: req.path,
+    method: req.method,
+    statusCode: err.statusCode || 500,
+    stack: err.stack,
+    body: req.body,
+    query: req.query,
+    ip: req.ip
+  });
   
   res.status(err.statusCode || 500).json({
     success: false,
