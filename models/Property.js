@@ -44,6 +44,7 @@ const PropertySchema = new mongoose.Schema(
     maintenance: {
       type: Number,
       min: 0,
+      default: 0,
     },
     listedBy: {
       type: String,
@@ -57,6 +58,7 @@ const PropertySchema = new mongoose.Schema(
     totalFloors: {
       type: Number,
       min: 0,
+      default: 0,
     },
     bedrooms: {
       type: String, // Allow both Number and String for values like '1BHK', '2BHK'
@@ -86,6 +88,7 @@ const PropertySchema = new mongoose.Schema(
     securityDeposit: {
       type: Number,
       min: 0,
+      default: 0,
     },
     landmarks: String,
     location: String,
@@ -100,10 +103,12 @@ const PropertySchema = new mongoose.Schema(
         "Vitrified",
         "Other",
       ],
+      required: false,
     },
     overlooking: {
       type: String,
       enum: ["Main Road", "Garden", "Park", "Pool", "Club", "Other"],
+      required: false
     },
     ageOfConstruction: {
       type: String,
@@ -116,10 +121,12 @@ const PropertySchema = new mongoose.Schema(
         "15-20 years",
         "More than 20 years",
       ],
+      required: false,
     },
     additionalRooms: {
       type: String,
       enum: ["Puja Room", "Study Room", "Servant Room", "Store Room", "Other"],
+      required: false,
     },
     waterAvailability: {
       type: String,
@@ -132,6 +139,7 @@ const PropertySchema = new mongoose.Schema(
         "Corporation Water",
         "Both",
       ],
+      required: false,
     },
     statusOfElectricity: {
       type: String,
@@ -142,6 +150,7 @@ const PropertySchema = new mongoose.Schema(
         "No Power Issues",
         "Generator Available",
       ],
+      required: false,
     },
     lift: {
       type: Number,
@@ -208,6 +217,15 @@ PropertySchema.index({
   'address.landmark': 'text',
   propertyType: 'text'
 });
+
+// Create additional indexes for frequently queried fields
+PropertySchema.index({ propertyType: 1 });
+PropertySchema.index({ bedrooms: 1 });
+PropertySchema.index({ price: 1 });
+PropertySchema.index({ location: 1 });
+PropertySchema.index({ furnished: 1 });
+PropertySchema.index({ isDeleted: 1 });
+PropertySchema.index({ createdAt: -1 }); // For sorting by newest
 
 // Update the updatedAt field on save
 PropertySchema.pre('save', function(next) {

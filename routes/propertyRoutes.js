@@ -276,46 +276,48 @@ router.delete(
  * @access  Private (admin, super_admin only)
  */
 router.put(
-  '/admin/:id/restore',
+  "/admin/:id/restore",
   protect,
-  authorize('admin', 'super_admin'),
+  authorize("admin", "super_admin"),
   validatePropertyId,
   async (req, res) => {
     try {
-      const Property = require('../models/Property');
-      
-      const property = await Property.findById(req.params.id);
+      const Property = require("../models/Property");
+
+      // Restore property in one step
+      const property = await Property.findByIdAndUpdate(
+        req.params.id,
+        { isDeleted: false },
+        { new: true, runValidators: true }
+      ).populate("agent", "name email phone");
 
       if (!property) {
         return res.status(404).json({
           success: false,
-          message: 'Property not found'
+          message: "Property not found",
         });
       }
 
+      // Optional: check if it was already restored
       if (!property.isDeleted) {
-        return res.status(400).json({
-          success: false,
-          message: 'Property is not deleted'
+        return res.status(200).json({
+          success: true,
+          message: "Property was already active",
+          data: property,
         });
       }
-
-      property.isDeleted = false;
-      await property.save();
-
-      await property.populate('agent', 'name email phone');
 
       res.status(200).json({
         success: true,
-        message: 'Property restored successfully',
-        data: property
+        message: "Property restored successfully",
+        data: property,
       });
     } catch (error) {
-      console.error('Restore property error:', error);
+      console.error("Restore property error:", error);
       res.status(500).json({
         success: false,
-        message: 'Failed to restore property',
-        error: error.message
+        message: "Failed to restore property",
+        error: error.message,
       });
     }
   }
@@ -333,11 +335,11 @@ router.get(
   async (req, res) => {
     try {
       const Property = require("../models/Property");
-      const range = req.query.range || "month"; // default to month
+      const range = req.query.range || "month";
       const now = new Date();
 
       // Overview stats
-      const stats = await Property.aggregate([
+      const overviewAgg = await Property.aggregate([
         {
           $group: {
             _id: null,
@@ -397,80 +399,92 @@ router.get(
         },
       ]);
 
-      // Property type distribution
-      const propertyTypeStats = await Property.aggregate([
+      const totalProperties = overviewAgg[0]?.totalProperties || 0;
+
+      // Property Type Distribution with percentages
+      const propertyTypeStatsRaw = await Property.aggregate([
         { $match: { isDeleted: false } },
         { $group: { _id: "$propertyType", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]);
 
+      const propertyTypeDistribution = propertyTypeStatsRaw.map((p) => ({
+        _id: p._id,
+        count: p.count,
+        percentage: totalProperties
+          ? ((p.count / totalProperties) * 100).toFixed(1)
+          : 0,
+      }));
+
+      // Status Distribution with percentages
+      const statusStats = [
+        {
+          status: "Available",
+          count: overviewAgg[0]?.availableProperties || 0,
+        },
+        { status: "Sold", count: overviewAgg[0]?.soldProperties || 0 },
+        { status: "Rented", count: overviewAgg[0]?.rentedProperties || 0 },
+        { status: "Deleted", count: overviewAgg[0]?.deletedProperties || 0 },
+      ].map((s) => ({
+        ...s,
+        percentage: totalProperties
+          ? ((s.count / totalProperties) * 100).toFixed(1)
+          : 0,
+      }));
+
       // Time-based stats
       let match = {};
       if (range === "week") {
         const last12Weeks = new Date();
-        last12Weeks.setDate(now.getDate() - 7 * 12); // last 12 weeks
+        last12Weeks.setDate(now.getDate() - 7 * 12);
         match.createdAt = { $gte: last12Weeks };
       } else if (range === "month") {
         const last12Months = new Date();
         last12Months.setMonth(now.getMonth() - 12);
         match.createdAt = { $gte: last12Months };
-      } else if (range === "year") {
+      } else {
         const last5Years = new Date();
         last5Years.setFullYear(now.getFullYear() - 5);
         match.createdAt = { $gte: last5Years };
       }
 
       let groupId;
-      if (range === "week") {
+      if (range === "week")
         groupId = {
           year: { $year: "$createdAt" },
           week: { $isoWeek: "$createdAt" },
         };
-      } else if (range === "month") {
+      else if (range === "month")
         groupId = {
           year: { $year: "$createdAt" },
           month: { $month: "$createdAt" },
         };
-      } else {
-        groupId = { year: { $year: "$createdAt" } };
-      }
+      else groupId = { year: { $year: "$createdAt" } };
 
       const timeStats = await Property.aggregate([
         { $match: match },
-        {
-          $group: {
-            _id: groupId,
-            count: { $sum: 1 },
-          },
-        },
+        { $group: { _id: groupId, count: { $sum: 1 } } },
         { $sort: { "_id.year": 1, "_id.month": 1, "_id.week": 1 } },
       ]);
 
       res.status(200).json({
         success: true,
         data: {
-          overview: stats[0] || {
-            totalProperties: 0,
-            activeProperties: 0,
-            deletedProperties: 0,
-            availableProperties: 0,
-            soldProperties: 0,
-            rentedProperties: 0,
-            averagePrice: 0,
-            totalImagesUploaded: 0,
-            totalVideosUploaded: 0,
-          },
-          propertyTypeDistribution: propertyTypeStats,
-          monthlyCreationStats: timeStats,
+          overview: overviewAgg[0] || {},
+          propertyTypeDistribution,
+          statusDistribution: statusStats,
+          creationStats: timeStats,
         },
       });
     } catch (error) {
-      console.error("Get property statistics error:", error);
-      res.status(500).json({
-        success: false,
-        message: "Failed to get property statistics",
-        error: error.message,
-      });
+      console.error(error);
+      res
+        .status(500)
+        .json({
+          success: false,
+          message: "Failed to get stats",
+          error: error.message,
+        });
     }
   }
 );

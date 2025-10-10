@@ -7,6 +7,7 @@ const {
   deleteFile,
 } = require("../services/r2Service");
 const multer = require("multer");
+const { convertToMp4 } = require('../services/VideoConvertor');
 const storage = multer.memoryStorage();
 
 const upload = multer({
@@ -29,17 +30,66 @@ const upload = multer({
   },
 });
 
+// Utility to remove empty string fields recursively
+function removeEmptyStrings(obj) {
+  Object.keys(obj).forEach((key) => {
+    if (obj[key] === "") {
+      delete obj[key]; // remove field if empty string
+    } else if (typeof obj[key] === "object" && obj[key] !== null) {
+      removeEmptyStrings(obj[key]); // handle nested objects too
+    }
+  });
+  return obj;
+}
+
+
 /**
- * @desc    Get all properties
+ * @desc    Get all properties with pagination and filtering
  * @route   GET /api/properties
  * @access  Public
  */
 const getProperties = async (req, res) => {
   try {
-    const filter = { isDeleted: false };
-    const properties = await Property.find(filter);
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 10;
+    const startIndex = (page - 1) * limit;
 
-    // Try to fetch super_admin once
+    // Base filter for non-deleted properties
+    const filter = { isDeleted: { $ne: true } }; // ignores null, string "true", etc.
+
+    // Apply other query filters
+    if (req.query.propertyType) filter.propertyType = req.query.propertyType;
+    if (req.query.bedrooms) filter.bedrooms = req.query.bedrooms;
+    if (req.query.furnished) filter.furnished = req.query.furnished;
+    if (req.query.location)
+      filter.location = { $regex: req.query.location, $options: "i" };
+
+    if (req.query.minPrice || req.query.maxPrice) {
+      filter.price = {};
+      if (req.query.minPrice) filter.price.$gte = parseInt(req.query.minPrice);
+      if (req.query.maxPrice) filter.price.$lte = parseInt(req.query.maxPrice);
+    }
+
+    if (req.query.minSize || req.query.maxSize) {
+      filter.size = {};
+      if (req.query.minSize) filter.size.$gte = parseInt(req.query.minSize);
+      if (req.query.maxSize) filter.size.$lte = parseInt(req.query.maxSize);
+    }
+
+    if (req.query.search) {
+      const searchRegex = new RegExp(req.query.search, "i");
+      filter.$or = [{ title: searchRegex }, { description: searchRegex }];
+    }
+
+    // Pagination
+    const total = await Property.countDocuments(filter);
+    const properties = await Property.find(filter)
+      .skip(startIndex)
+      .limit(limit)
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // Fetch super admin once
     const superAdmin = await User.findOne({ role: "super_admin" });
 
     const propertiesWithUrls = await Promise.all(
@@ -48,8 +98,8 @@ const getProperties = async (req, res) => {
           (property.images || [])
             .filter((img) => img.key)
             .map(async (img) => ({
-              ...img.toObject(),
-              presignUrl: img.key ? await getPresignedUrl(img.key) : null,
+              ...img,
+              presignUrl: await getPresignedUrl(img.key),
             }))
         );
 
@@ -57,8 +107,8 @@ const getProperties = async (req, res) => {
           (property.videos || [])
             .filter((vid) => vid.key)
             .map(async (vid) => ({
-              ...vid.toObject(),
-              presignUrl: vid.key ? await getPresignedUrl(vid.key) : null,
+              ...vid,
+              presignUrl: await getPresignedUrl(vid.key),
               thumbnail: vid.thumbnailKey
                 ? await getPresignedUrl(vid.thumbnailKey)
                 : null,
@@ -66,7 +116,7 @@ const getProperties = async (req, res) => {
         );
 
         return {
-          ...property.toObject(),
+          ...property,
           agent: superAdmin
             ? {
                 _id: superAdmin._id,
@@ -75,7 +125,7 @@ const getProperties = async (req, res) => {
                 phone: superAdmin.phone,
                 role: superAdmin.role,
               }
-            : {}, // send empty object if no super admin
+            : {},
           images,
           videos,
         };
@@ -85,6 +135,14 @@ const getProperties = async (req, res) => {
     res.status(200).json({
       success: true,
       count: propertiesWithUrls.length,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit),
+        hasNextPage: page < Math.ceil(total / limit),
+        hasPrevPage: page > 1,
+      },
       data: propertiesWithUrls,
     });
   } catch (error) {
@@ -182,6 +240,8 @@ const createProperty = async (req, res) => {
         message: "Super admin user not found",
       });
     }
+    // Remove empty string fields from req.body
+    req.body = removeEmptyStrings(req.body);
 
     const propertyData = {
       ...req.body,
@@ -278,6 +338,8 @@ const updateProperty = async (req, res) => {
         message: "Super admin user not found",
       });
     }
+    // Remove empty string fields from req.body
+    req.body = removeEmptyStrings(req.body);
 
     // Always set agent to super_admin
     property.agent = superAdmin._id;
@@ -418,16 +480,24 @@ const handleNewUploads = async (property, uploadedImages, uploadedVideos, usedFi
   // Videos
   const newVideos = uploadedVideos.filter((f) => !usedFiles.has(f));
   for (const file of newVideos) {
-    const baseName = file.originalname.replace(/\.[^/.]+$/, "");
+    let videoBuffer = file.buffer;
+    let videoName = file.originalname;
+    // Convert to mp4 if not already
+    if (file.mimetype !== "video/mp4") {
+      videoBuffer = await convertToMp4(videoBuffer, videoName);
+      videoName = videoName.replace(/\.[^/.]+$/, ".mp4");
+    }
+
+    const baseName = videoName.replace(/\.[^/.]+$/, "");
     const thumbKey = `properties/${property._id}/videos/thumbnails/${Date.now()}-${baseName}-thumbnail.png`;
 
     // Generate/upload thumbnail FIRST
-    const thumbBuffer = await generateVideoThumbnail(file.buffer, file.originalname);
+    const thumbBuffer = await generateVideoThumbnail(videoBuffer, videoName);
     await uploadBuffer(thumbBuffer, thumbKey, "image/png");
 
     // If thumbnail succeeded, upload video
-    const key = `properties/${property._id}/videos/${Date.now()}-${file.originalname}`;
-    await uploadBuffer(file.buffer, key, file.mimetype);
+    const key = `properties/${property._id}/videos/${Date.now()}-${videoName}`;
+    await uploadBuffer(videoBuffer, key, "video/mp4");
 
     property.videos.push({ key, thumbnailKey: thumbKey });
   }
@@ -513,12 +583,21 @@ const uploadPropertyVideos = async (req, res) => {
     if (!property.videos) property.videos = [];
 
     for (const file of req.files.videos) {
+       let videoBuffer = file.buffer;
+       let videoName = file.originalname;
+
+       // Convert to mp4 if not already
+       if (file.mimetype !== "video/mp4") {
+         videoBuffer = await convertToMp4(file.buffer, file.originalname);
+         videoName = file.originalname.replace(/\.[^/.]+$/, ".mp4");
+       }
+
       // Generate thumbnail
       const thumbBuffer = await generateVideoThumbnail(
-        file.buffer,
-        file.originalname
+        videoBuffer,
+        videoName
       );
-      const baseName = file.originalname.replace(/\.[^/.]+$/, "");
+      const baseName = videoName.replace(/\.[^/.]+$/, "");
       const thumbKey = `properties/${
         property._id
       }/videos/thumbnails/${Date.now()}-${baseName}-thumbnail.png`;
@@ -526,9 +605,9 @@ const uploadPropertyVideos = async (req, res) => {
 
       // Directly upload the video
       const videoKey = `properties/${propertyId}/videos/${Date.now()}-${
-        file.originalname
+        videoName
       }`;
-      await uploadBuffer(file.buffer, videoKey, file.mimetype);
+      await uploadBuffer(videoBuffer, videoKey, "video/mp4");
 
 
       // Save both video and thumbnail keys in property
@@ -553,10 +632,11 @@ const uploadPropertyVideos = async (req, res) => {
  */
 const deleteProperty = async (req, res) => {
   try {
-    const property = await Property.findOne({
-      _id: req.params.id,
-      isDeleted: false
-    });
+   const property = await Property.findByIdAndUpdate(
+     req.params.id,
+     { isDeleted: true },
+     { new: true, runValidators: true } // returns the updated doc
+   );
 
     if (!property) {
       return res.status(404).json({

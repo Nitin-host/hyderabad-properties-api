@@ -1,8 +1,9 @@
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const { validationResult } = require('express-validator');
 const crypto = require('crypto');
-const { sendConfirmationEmail, sendOfficialCredentialsEmail, sendPasswordResetEmail, sendOtpEmail, sendNewUserDetailsToSuperAdmin } = require('../services/emailService');
+const { sendConfirmationEmail, sendOfficialCredentialsEmail, sendOtpEmail, sendNewUserDetailsToSuperAdmin, sendForgotPasswordOtpEmail } = require('../services/emailService');
 
 // Generate JWT Token
 const generateToken = (id) => {
@@ -88,75 +89,111 @@ exports.register = async (req, res) => {
   }
 };
 
-// @desc    Login user
+// @desc    Login user (normal, temp password, and super_admin OTP)
+// @route   POST /api/users/login
+// @access  Public
+// @desc    Login user (supports normal, temp password, and super_admin OTP)
 // @route   POST /api/users/login
 // @access  Public
 exports.login = async (req, res) => {
-  const { email, password } = req.body;
+  try {
+    const { email, password } = req.body;
 
-  // 🔑 Ensure password is fetched
-  const user = await User.findOne({ email }).select("+password");
-  if (!user) {
-    return res
-      .status(400)
-      .json({ success: false, message: "Invalid credentials" });
-  }
+    // Find user including password and tempPassword
+    const user = await User.findOne({ email }).select(
+      "+password +tempPassword"
+    );
+    if (!user) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid credentials" });
+    }
 
-  const isMatch = await user.matchPassword(password);
-  if (!isMatch) {
-    return res
-      .status(400)
-      .json({ success: false, message: "Invalid credentials" });
-  }
+    let isMatch = await user.matchPassword(password);
+    let isTempPassword = false;
 
-  if (user.role === "super_admin") {
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    user.otp = otp;
-    user.otpExpiry = Date.now() + 10 * 60 * 1000;
-    await user.save();
+    // Check temp password
+    if (!isMatch && user.tempPassword) {
+      isTempPassword = await bcrypt.compare(password, user.tempPassword);
+    }
 
-    await sendOtpEmail(user.email, user.name, otp);
+    if (!isMatch && !isTempPassword) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid credentials" });
+    }
 
-    return res.status(200).json({
+    // ------------------- TEMP PASSWORD FLOW -------------------
+    if (isTempPassword || user.mustChangePassword) {
+      return res.status(200).json({
+        success: true,
+        mustChangePassword: true,
+        message:
+          "Login successful with temporary password. Please set a new password.",
+        data: {
+          user: {
+            id: user._id,
+            name: user.name,
+            email: user.email,
+            role: user.role,
+            phone: user.phone,
+          },
+        },
+      });
+    }
+
+    // ------------------- ADMIN OTP FLOW -------------------
+    if (user.role === "admin") {
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      user.otp = otp;
+      user.otpExpiry = Date.now() + 10 * 60 * 1000; // 10 mins
+      await user.save({ validateBeforeSave: false });
+
+      await sendOtpEmail(user.email, user.name, otp);
+
+      return res.status(200).json({
+        success: true,
+        otpRequired: true,
+        message: "OTP sent to email. Please verify to complete login.",
+      });
+    }
+
+    // ------------------- NORMAL LOGIN -------------------
+    const token = generateToken(user._id);
+    const refreshToken = generateRefreshToken(user._id);
+
+    user.password = undefined;
+    user.tempPassword = undefined;
+
+    res.status(200).json({
       success: true,
-      otpRequired: true,
-      message: "OTP sent to email. Please verify to complete login.",
+      message: "Login successful",
+      data: { user, token, refreshToken },
     });
+  } catch (error) {
+    console.error("Login Error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
   }
-
-  // ✅ ensure JWT secret exists
-  if (!process.env.JWT_SECRET) {
-    console.error("JWT_SECRET is missing in environment");
-    return res
-      .status(500)
-      .json({ success: false, message: "Server config error" });
-  }
-
-  const token = generateToken(user._id);
-  const refreshToken = generateRefreshToken(user._id);
-  user.password = undefined;
-
-  res.status(200).json({
-    success: true,
-    message: "Login successful",
-    data: { user, token, refreshToken },
-  });
 };
 
-// @desc    Verify OTP for Super Admin
+// @desc    Verify OTP for Admin
 // @route   POST /api/users/verify-otp
 // @access  Public
-exports.verifyOtp = async (req, res) => {
+exports.verifyAdminOtp = async (req, res) => {
   try {
     const { email, otp } = req.body;
 
     const user = await User.findOne({ email });
-    if (!user || user.role !== "super_admin") {
-      return res.status(400).json({ success: false, message: "Invalid request" });
+    if (!user || user.role !== "admin") {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid request" });
     }
 
     if (user.otp !== otp || user.otpExpiry < Date.now()) {
-      return res.status(400).json({ success: false, message: "Invalid or expired OTP" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid or expired OTP" });
     }
 
     // clear otp fields
@@ -171,11 +208,16 @@ exports.verifyOtp = async (req, res) => {
     res.status(200).json({
       success: true,
       message: "OTP verified, login successful",
-      data: { user, token, refreshToken }
+      data: { user, token, refreshToken },
     });
   } catch (error) {
     console.error("OTP verify error:", error);
-    res.status(500).json({ success: false, message: "Server error during OTP verification" });
+    res
+      .status(500)
+      .json({
+        success: false,
+        message: "Server error during OTP verification",
+      });
   }
 };
 
@@ -280,7 +322,6 @@ exports.updateProfile = async (req, res) => {
 // @access  Private (Super Admin)
 exports.createUser = async (req, res) => {
   try {
-    // Check for validation errors
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({
@@ -302,35 +343,33 @@ exports.createUser = async (req, res) => {
     }
 
     // Generate temporary password
-    const tempPassword = crypto.randomBytes(8).toString('hex');
+    const tempPassword = crypto.randomBytes(4).toString('hex'); // 8 chars
 
-    // Create user
+    // Create user with mustChangePassword
     const user = await User.create({
       name,
       email,
       password: tempPassword,
+      tempPassword,            // hashed automatically in pre-save
       phone,
-      role: role === 'super_admin' ? 'admin' : role // Default to admin for super_admin created users
+      role: role === 'super_admin' ? 'admin' : role,
+      mustChangePassword: true
     });
 
-    // Remove password from response
     user.password = undefined;
+    user.tempPassword = undefined;
 
-    // Send official email with credentials
+    // Send official email with temp credentials
     try {
       await sendOfficialCredentialsEmail(user.email, user.name, tempPassword, user.role);
     } catch (emailError) {
       console.error('Failed to send credentials email:', emailError);
-      // Don't fail user creation if email fails
     }
 
     res.status(201).json({
       success: true,
-      message: 'User created successfully. Login credentials sent to email.',
-      data: {
-        user,
-        tempPassword // Remove this in production, only for development
-      }
+      message: 'User created successfully. Temporary password sent via email.',
+      data: { user }
     });
   } catch (error) {
     console.error('Create user error:', error);
@@ -492,135 +531,119 @@ exports.logout = async (req, res) => {
   }
 };
 
-// @desc    Forgot password
+// @desc    Forgot password - send OTP
 // @route   POST /api/users/forgot-password
 // @access  Public
 exports.forgotPassword = async (req, res) => {
   try {
-    // Check for validation errors
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: errors.array()
-      });
-    }
-
     const { email } = req.body;
-
-    // Find user by email
     const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found with this email'
-      });
-    }
+    if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
-    // Generate reset token
-    const resetToken = crypto.randomBytes(32).toString('hex');
-    const resetTokenExpire = Date.now() + 10 * 60 * 1000; // 10 minutes
-
-    // Hash token and save to user
-    user.resetPasswordToken = crypto.createHash('sha256').update(resetToken).digest('hex');
-    user.resetPasswordExpire = resetTokenExpire;
+    // Generate OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    user.otp = otp;
+    user.otpExpiry = Date.now() + 10 * 60 * 1000; // 10 mins
     await user.save({ validateBeforeSave: false });
 
-    try {
-      // Send password reset email
-      await sendPasswordResetEmail(user.email, user.name, resetToken);
+    await sendForgotPasswordOtpEmail(user.email, user.name, otp);
 
-      res.status(200).json({
-        success: true,
-        message: 'Password reset email sent successfully'
-      });
-    } catch (emailError) {
-      console.error('Email sending failed:', emailError);
-      
-      // Clear reset token fields if email fails
-      user.resetPasswordToken = undefined;
-      user.resetPasswordExpire = undefined;
-      await user.save({ validateBeforeSave: false });
-
-      return res.status(500).json({
-        success: false,
-        message: 'Email could not be sent. Please try again later.'
-      });
-    }
-  } catch (error) {
-    console.error('Forgot password error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error during password reset request'
+    res.status(200).json({
+      success: true,
+      message: "OTP sent to your email. Please verify to reset password."
     });
+  } catch (error) {
+    console.error("Forgot password error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+// @desc    Verify OTP and reset password
+// @route   POST /api/users/verify-forgot-password-otp
+// @access  Public
+exports.verifyForgotOtp = async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    const user = await User.findOne({ email });
+    if (!user)
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+
+    if (user.otp !== otp || user.otpExpiry < Date.now()) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid or expired OTP" });
+    }
+
+    // ✅ Clear OTP after successful verification but DO NOT change password here
+    user.otp = undefined;
+    user.otpExpiry = undefined;
+    await user.save();
+
+    res.status(200).json({ success: true, message: "OTP verified" });
+  } catch (error) {
+    console.error("Verify OTP error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
 // @desc    Reset password
-// @route   PUT /api/users/reset-password/:token
+// @route   PUT /api/users/reset-password
 // @access  Public
 exports.resetPassword = async (req, res) => {
   try {
-    // Check for validation errors
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: errors.array()
-      });
-    }
+    const { email, password } = req.body;
 
-    const { password } = req.body;
-    const { token } = req.params;
-
-    // Hash the token to compare with stored token
-    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
-
-    // Find user by reset token and check if token is not expired
-    const user = await User.findOne({
-      resetPasswordToken: hashedToken,
-      resetPasswordExpire: { $gt: Date.now() }
-    });
-
+    const user = await User.findOne({ email });
     if (!user) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid or expired reset token'
+        message: "User not found",
       });
     }
 
-    // Set new password
+    // Optional: ensure OTP was verified first
+    if (user.otp || user.otpExpiry) {
+      return res.status(400).json({
+        success: false,
+        message: "Please verify OTP before resetting password",
+      });
+    }
+
+    // ✅ Set new password
     user.password = password;
-    user.resetPasswordToken = undefined;
-    user.resetPasswordExpire = undefined;
+
+    // ✅ Reset mustChangePassword flag
+    user.mustChangePassword = false;
+
     await user.save();
 
-    // Generate new JWT token
-    const jwtToken = generateToken(user._id);
+    // Generate tokens
+    const token = generateToken(user._id);
     const refreshToken = generateRefreshToken(user._id);
 
     res.status(200).json({
       success: true,
-      message: 'Password reset successful',
+      message: "Password reset successful",
       data: {
         user: {
           id: user._id,
           name: user.name,
           email: user.email,
           role: user.role,
-          phone: user.phone
+          phone: user.phone,
         },
-        token: jwtToken,
-        refreshToken
-      }
+        token,
+        refreshToken,
+      },
     });
   } catch (error) {
-    console.error('Reset password error:', error);
+    console.error("Reset password error:", error);
     res.status(500).json({
       success: false,
-      message: 'Server error during password reset'
+      message: "Server error during password reset",
     });
   }
 };
