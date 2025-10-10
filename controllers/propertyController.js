@@ -50,19 +50,22 @@ function removeEmptyStrings(obj) {
  */
 const getProperties = async (req, res) => {
   try {
-    const page = parseInt(req.query.page, 10) || 1;
-    const limit = parseInt(req.query.limit, 10) || 10;
-    const startIndex = (page - 1) * limit;
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
+    const skip = (page - 1) * limit;
 
     // Base filter for non-deleted properties
-    const filter = { isDeleted: { $ne: true } }; // ignores null, string "true", etc.
+    const filter = { isDeleted: { $ne: true } };
 
-    // Apply other query filters
-    if (req.query.propertyType) filter.propertyType = req.query.propertyType;
-    if (req.query.bedrooms) filter.bedrooms = req.query.bedrooms;
-    if (req.query.furnished) filter.furnished = req.query.furnished;
-    if (req.query.location)
+    // Apply query filters dynamically
+    const queryFields = ["propertyType", "bedrooms", "furnished"];
+    queryFields.forEach((field) => {
+      if (req.query[field]) filter[field] = req.query[field];
+    });
+
+    if (req.query.location) {
       filter.location = { $regex: req.query.location, $options: "i" };
+    }
 
     if (req.query.minPrice || req.query.maxPrice) {
       filter.price = {};
@@ -81,21 +84,28 @@ const getProperties = async (req, res) => {
       filter.$or = [{ title: searchRegex }, { description: searchRegex }];
     }
 
-    // Pagination
+    // Total count for pagination
     const total = await Property.countDocuments(filter);
-    const properties = await Property.find(filter)
-      .skip(startIndex)
-      .limit(limit)
-      .sort({ createdAt: -1 })
-      .lean();
 
     // Fetch super admin once
-    const superAdmin = await User.findOne({ role: "super_admin" });
+    const superAdmin = await User.findOne({ role: "super_admin" }).select(
+      "_id name email phone role"
+    );
 
+    // Fetch properties with createdBy and updatedBy populated
+    const properties = await Property.find(filter)
+      .skip(skip)
+      .limit(limit)
+      .sort({ createdAt: -1 })
+      .populate("createdBy", "name email phone")
+      .populate("updatedBy", "name email phone")
+      .lean();
+
+    // Map images/videos to include presigned URLs
     const propertiesWithUrls = await Promise.all(
-      properties.map(async (property) => {
+      properties.map(async (prop) => {
         const images = await Promise.all(
-          (property.images || [])
+          (prop.images || [])
             .filter((img) => img.key)
             .map(async (img) => ({
               ...img,
@@ -104,7 +114,7 @@ const getProperties = async (req, res) => {
         );
 
         const videos = await Promise.all(
-          (property.videos || [])
+          (prop.videos || [])
             .filter((vid) => vid.key)
             .map(async (vid) => ({
               ...vid,
@@ -116,16 +126,8 @@ const getProperties = async (req, res) => {
         );
 
         return {
-          ...property,
-          agent: superAdmin
-            ? {
-                _id: superAdmin._id,
-                name: superAdmin.name,
-                email: superAdmin.email,
-                phone: superAdmin.phone,
-                role: superAdmin.role,
-              }
-            : {},
+          ...prop,
+          agent: superAdmin || null,
           images,
           videos,
         };
@@ -154,6 +156,7 @@ const getProperties = async (req, res) => {
     });
   }
 };
+
 
 /**
  * @desc    Get single property
@@ -246,6 +249,7 @@ const createProperty = async (req, res) => {
     const propertyData = {
       ...req.body,
       agent: superAdmin._id, // always super_admin
+      createdBy: req.user._id, // track who created
     };
 
     // Safely parse amenities if sent as string
@@ -343,6 +347,8 @@ const updateProperty = async (req, res) => {
 
     // Always set agent to super_admin
     property.agent = superAdmin._id;
+
+     property.updatedBy = req.user?._id; // track who updated
 
     // Parse JSON fields safely
     const replaceMap = safeParseObject(req.body.replaceMap, "replaceMap");

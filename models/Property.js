@@ -205,6 +205,14 @@ const PropertySchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    createdBy: {
+      type: mongoose.Schema.ObjectId,
+      ref: "User",
+    },
+    updatedBy: {
+      type: mongoose.Schema.ObjectId,
+      ref: "User",
+    },
   },
   { timestamps: true }
 );
