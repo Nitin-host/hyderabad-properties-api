@@ -26,13 +26,15 @@ const URL_CACHE_TTL = 3600000; // 1 hour in milliseconds
 async function uploadBuffer(
   buffer,
   key,
-  contentType = "application/octet-stream"
+  contentType
 ) {
   const command = new PutObjectCommand({
     Bucket: R2_BUCKET,
     Key: key,
     Body: buffer,
-    ContentType: contentType,
+    ContentType:
+      contentType ||
+      (key.endsWith(".mp4") ? "video/mp4" : "application/octet-stream"),
   });
   await r2.send(command);
   return { key }; // only key stored in DB
