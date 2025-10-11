@@ -12,6 +12,11 @@ dotenv.config();
 
 const app = express();
 
+// ✅ Add this immediately after creating the app instance
+if (process.env.NODE_ENV === "production") {
+  app.set("trust proxy", 1); // Required for Render, Nginx, AWS ELB, Cloudflare, etc.
+}
+
 // Compression middleware - reduce response size
 app.use(compression());
 
