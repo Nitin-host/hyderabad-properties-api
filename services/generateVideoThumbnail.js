@@ -7,59 +7,44 @@ const fs = require("fs");
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 ffmpeg.setFfprobePath(ffprobeInstaller.path);
 
-const generateVideoThumbnail = async (videoBuffer, originalVideoName) => {
-  const tempDir = path.join(__dirname, "uploads", "temp");
-  fs.mkdirSync(tempDir, { recursive: true });
+/**
+ * Generate a video thumbnail and return its path.
+ * @param {string} videoPath - Path to the video file
+ * @param {string} outputDir - Directory to temporarily save thumbnail
+ * @returns {Promise<string>} - Path of the generated thumbnail
+ */
+const generateVideoThumbnail = async (
+  videoPath,
+  outputDir = "uploads/video-thumbnails"
+) => {
+  if (!fs.existsSync(videoPath)) {
+    throw new Error("Video file does not exist");
+  }
 
-  const tempVideoPath = path.join(
-    tempDir,
-    `${Date.now()}-${originalVideoName}`
+  // Ensure output directory exists
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  const baseName = path.parse(videoPath).name;
+  const thumbnailPath = path.join(
+    outputDir,
+    `${Date.now()}-${baseName}-thumbnail.png`
   );
-  const baseName = path.parse(originalVideoName).name;
-  const tempThumbnailPath = path.join(tempDir, `${baseName}-thumbnail.png`);
-
-  fs.writeFileSync(tempVideoPath, videoBuffer);
 
   return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(tempVideoPath, (err, metadata) => {
-      if (err) {
-        fs.unlinkSync(tempVideoPath);
-        return reject(err);
-      }
-
-      const duration = metadata.format.duration || 1;
-      const captureTime = Math.min(3, duration);
-
-      ffmpeg(tempVideoPath)
-        .screenshots({
-          timestamps: [captureTime],
-          filename: path.basename(tempThumbnailPath),
-          folder: tempDir,
-          size: "320x240",
-        })
-        .on("end", () => {
-          try {
-            const thumbBuffer = fs.readFileSync(tempThumbnailPath);
-
-            // ✅ Cleanup temp video & temp thumbnail
-            fs.unlinkSync(tempVideoPath);
-            fs.unlinkSync(tempThumbnailPath);
-
-            resolve(thumbBuffer); // return buffer to upload to R2
-          } catch (readErr) {
-            if (fs.existsSync(tempVideoPath)) fs.unlinkSync(tempVideoPath);
-            if (fs.existsSync(tempThumbnailPath))
-              fs.unlinkSync(tempThumbnailPath);
-            reject(readErr);
-          }
-        })
-        .on("error", (ffmpegErr) => {
-          if (fs.existsSync(tempVideoPath)) fs.unlinkSync(tempVideoPath);
-          if (fs.existsSync(tempThumbnailPath))
-            fs.unlinkSync(tempThumbnailPath);
-          reject(ffmpegErr);
-        });
-    });
+    ffmpeg(videoPath)
+      .screenshots({
+        timestamps: ["3%"],
+        filename: path.basename(thumbnailPath),
+        folder: outputDir,
+        size: "320x240",
+      })
+      .on("end", () => {
+        if (!fs.existsSync(thumbnailPath)) {
+          return reject(new Error("Thumbnail generation failed"));
+        }
+        resolve(thumbnailPath);
+      })
+      .on("error", (err) => reject(err));
   });
 };
 
