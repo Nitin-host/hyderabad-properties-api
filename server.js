@@ -114,15 +114,15 @@ app.use('/api', require('./routes/contact'));
 
 // Global error handler
 app.use((err, req, res, next) => {
-  logger.error(`${err.name}: ${err.message}`, { 
-    path: req.path,
-    method: req.method,
-    statusCode: err.statusCode || 500,
-    stack: err.stack,
-    body: req.body,
-    query: req.query,
-    ip: req.ip
-  });
+  // logger.error(`${err.name}: ${err.message}`, { 
+  //   path: req.path,
+  //   method: req.method,
+  //   statusCode: err.statusCode || 500,
+  //   stack: err.stack,
+  //   body: req.body,
+  //   query: req.query,
+  //   ip: req.ip
+  // });
   
   res.status(err.statusCode || 500).json({
     success: false,
