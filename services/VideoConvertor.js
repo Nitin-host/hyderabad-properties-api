@@ -9,10 +9,11 @@ const path = require("path");
  * @param {string} outputDir - Folder to save converted video
  * @returns {Promise<string>} - Path to converted MP4
  */
+const CONVERTED_VIDEOS_DIR = process.env.CONVERTED_VIDEOS_DIR || "uploads/converted-videos";
 const convertToMp4 = (
   filePath,
   originalName,
-  outputDir = "uploads/converted-videos"
+  outputDir = CONVERTED_VIDEOS_DIR
 ) => {
   return new Promise((resolve, reject) => {
     // Ensure output directory exists

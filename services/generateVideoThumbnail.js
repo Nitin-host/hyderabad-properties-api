@@ -13,9 +13,10 @@ ffmpeg.setFfprobePath(ffprobeInstaller.path);
  * @param {string} outputDir - Directory to temporarily save thumbnail
  * @returns {Promise<string>} - Path of the generated thumbnail
  */
+const THUMBNAIL_DIR = process.env.THUMBNAIL_DIR || "uploads/video-thumbnails";
 const generateVideoThumbnail = async (
   videoPath,
-  outputDir = "uploads/video-thumbnails"
+  outputDir = THUMBNAIL_DIR
 ) => {
   if (!fs.existsSync(videoPath)) {
     throw new Error("Video file does not exist");
