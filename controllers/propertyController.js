@@ -1,32 +1,37 @@
-const Property = require('../models/Property');
-const {generateVideoThumbnail} = require('../services/generateVideoThumbnail');
-const User = require('../models/User');
+const Property = require("../models/Property");
 const {
-  uploadBuffer,
+  generateVideoThumbnail,
+} = require("../services/generateVideoThumbnail");
+const User = require("../models/User");
+const {
+  uploadStream,
   getPresignedUrl,
   deleteFile,
 } = require("../services/r2Service");
 const multer = require("multer");
-const { convertToMp4 } = require('../services/VideoConvertor');
-const storage = multer.memoryStorage();
+const path = require("path");
+const fs = require("fs");
+const { convertToMp4 } = require("../services/VideoConvertor");
+
+// --- Temp folder setup ---
+const uploadTempFolder = path.join(__dirname, "../tempUploads");
+if (!fs.existsSync(uploadTempFolder)) fs.mkdirSync(uploadTempFolder);
+
+// --- Multer disk storage ---
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadTempFolder),
+  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+});
 
 const upload = multer({
   storage,
-  limits: {
-    fileSize: 500 * 1024 * 1024, // 500MB max size (adjust as needed)
-  },
   fileFilter: (req, file, cb) => {
-    if (file.fieldname === "images") {
-      if (file.mimetype.startsWith("image/")) cb(null, true);
-      else cb(new Error("Only image files allowed for images"), false);
-    } else if (file.fieldname === "videos") {
-      if (file.mimetype.startsWith("video/")) cb(null, true);
-      else cb(new Error("Only video files allowed for videos"), false);
-    } else if (file.fieldname === "replaceMapFiles") {
+    if (file.fieldname === "images" && file.mimetype.startsWith("image/"))
       cb(null, true);
-    } else {
-      cb(new Error("Invalid file field"), false);
-    }
+    else if (file.fieldname === "videos" && file.mimetype.startsWith("video/"))
+      cb(null, true);
+    else if (file.fieldname === "replaceMapFiles") cb(null, true);
+    else cb(new Error("Invalid file type"), false);
   },
 });
 
@@ -42,6 +47,146 @@ function removeEmptyStrings(obj) {
   return obj;
 }
 
+// --- Upload single file to R2 and remove local file ---
+async function uploadFileToR2(filePath, r2Key, mimetype) {
+  try {
+    const stream = fs.createReadStream(filePath);
+    await uploadStream(stream, r2Key, mimetype);
+  } catch (err) {
+    console.error(`Failed to upload file ${filePath} to R2:`, err);
+    throw err; // rethrow so caller knows upload failed
+  }
+}
+
+// Synchronous safe delete helper for local files
+const safeDeleteSync = (filePath) => {
+  if (!filePath) return;
+  if (fs.existsSync(filePath)) {
+    try {
+      fs.unlinkSync(filePath);
+      console.log("✅ Deleted temp file:", filePath);
+    } catch (err) {
+      console.error("❌ Safe delete failed:", err);
+    }
+  } else {
+    console.log("⚠️ Skip delete — file not found:", filePath);
+  }
+};
+
+// --- Helpers for robust upload with tracking ---
+/**
+ * Upload an image file and track uploaded keys & local temp
+ * Returns an object { key } (R2 key)
+ */
+async function processImageUpload({
+  file,
+  propertyId,
+  r2UploadedKeys,
+  localTempFiles,
+}) {
+  const key = `properties/${propertyId}/images/${Date.now()}-${
+    file.originalname
+  }`;
+  // track local file for cleanup
+  localTempFiles.push(file.path);
+  await uploadFileToR2(file.path, key, file.mimetype);
+  r2UploadedKeys.push(key);
+  return { key };
+}
+
+/**
+ * Upload a video (convert if needed), generate thumbnail, and track uploaded keys & local temp
+ * Returns { key: videoKey, thumbnailKey }
+ */
+async function processVideoUpload({
+  file,
+  propertyId,
+  r2UploadedKeys,
+  localTempFiles,
+}) {
+  // track original local path for cleanup
+  localTempFiles.push(file.path);
+
+  let videoPath = file.path;
+  let finalName = file.originalname;
+
+  // convert to mp4 if needed
+  if (file.mimetype !== "video/mp4") {
+    const convertedPath = await convertToMp4(file.path, file.originalname);
+    // track converted path for cleanup
+    localTempFiles.push(convertedPath);
+    // delete original upload later (we tracked)
+    videoPath = convertedPath;
+    finalName = finalName.replace(/\.[^/.]+$/, ".mp4");
+  }
+
+  // generate thumbnail
+  const thumbPath = await generateVideoThumbnail(videoPath);
+  if (!fs.existsSync(thumbPath)) {
+    throw new Error("Thumbnail generation failed");
+  }
+  // track thumbnail for cleanup
+  localTempFiles.push(thumbPath);
+
+  const baseName = path.parse(finalName).name;
+  const videoKey = `properties/${propertyId}/videos/${Date.now()}-${finalName}`;
+  const thumbKey = `properties/${propertyId}/videos/thumbnails/${Date.now()}-${baseName}-thumbnail.png`;
+
+  // upload thumbnail first (so if video upload fails we can delete thumbnail)
+  await uploadFileToR2(thumbPath, thumbKey, "image/png");
+  r2UploadedKeys.push(thumbKey);
+
+  // upload video
+  await uploadFileToR2(videoPath, videoKey, "video/mp4");
+  r2UploadedKeys.push(videoKey);
+
+  return { key: videoKey, thumbnailKey: thumbKey };
+}
+
+// --- Safe JSON parsing helpers (as in your original file) ---
+function safeParseArray(bodyField, fieldName) {
+  if (!bodyField) return [];
+  if (typeof bodyField === "string") {
+    try {
+      const parsed = JSON.parse(bodyField);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (err) {
+      console.error(`[ERROR] Invalid JSON in ${fieldName}:`, bodyField, err);
+      return [];
+    }
+  }
+  if (Array.isArray(bodyField)) {
+    return bodyField;
+  }
+  console.warn(
+    `[WARN] Unexpected type for ${fieldName}:`,
+    typeof bodyField,
+    bodyField
+  );
+  return [];
+}
+
+function safeParseObject(bodyField, fieldName) {
+  if (!bodyField) return {};
+  if (typeof bodyField === "string") {
+    try {
+      const parsed = JSON.parse(bodyField);
+      return typeof parsed === "object" && parsed !== null ? parsed : {};
+    } catch (err) {
+      console.error(`[ERROR] Invalid JSON in ${fieldName}:`, bodyField, err);
+      return {};
+    }
+  }
+  if (typeof bodyField === "object") {
+    return bodyField;
+  }
+  console.warn(
+    `[WARN] Unexpected type for ${fieldName}:`,
+    typeof bodyField,
+    bodyField
+  );
+  return {};
+}
 
 /**
  * @desc    Get all properties with pagination and filtering
@@ -127,7 +272,7 @@ const getProperties = async (req, res) => {
 
         return {
           ...prop,
-          agent: superAdmin || null,
+          agent: superAdmin ? superAdmin._id : null,
           images,
           videos,
         };
@@ -156,7 +301,6 @@ const getProperties = async (req, res) => {
     });
   }
 };
-
 
 /**
  * @desc    Get single property
@@ -250,6 +394,7 @@ const createProperty = async (req, res) => {
       ...req.body,
       agent: superAdmin._id, // always super_admin
       createdBy: req.user._id, // track who created
+      updatedBy: req.user._id, // set updatedBy initially
     };
 
     // Safely parse amenities if sent as string
@@ -283,49 +428,27 @@ const createProperty = async (req, res) => {
   }
 };
 
-// --- Parse JSON safely with debug logs ---
-function safeParseArray(bodyField, fieldName) {
-  if (!bodyField) return [];
-  if (typeof bodyField === "string") {
-    try {
-      const parsed = JSON.parse(bodyField);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch (err) {
-      console.error(`[ERROR] Invalid JSON in ${fieldName}:`, bodyField, err);
-      return [];
-    }
-  }
-  if (Array.isArray(bodyField)) {
-    return bodyField;
-  }
-  console.warn(`[WARN] Unexpected type for ${fieldName}:`, typeof bodyField, bodyField);
-  return [];
-}
-
-function safeParseObject(bodyField, fieldName) {
-  if (!bodyField) return {};
-  if (typeof bodyField === "string") {
-    try {
-      const parsed = JSON.parse(bodyField);
-      return typeof parsed === "object" && parsed !== null ? parsed : {};
-    } catch (err) {
-      console.error(`[ERROR] Invalid JSON in ${fieldName}:`, bodyField, err);
-      return {};
-    }
-  }
-  if (typeof bodyField === "object") {
-    return bodyField;
-  }
-  console.warn(`[WARN] Unexpected type for ${fieldName}:`, typeof bodyField, bodyField);
-  return {};
-}
-
 /**
  * @desc    Update property metadata and optionally upload/replace/remove media.
  * @route   PUT /api/properties/:id
  * @access  Private
+ *
+ * Important flow (transaction-like):
+ * 1) Parse incoming JSON fields & files
+ * 2) Upload all NEW/REPLACEMENT files to R2 first while tracking uploaded keys & local temps
+ * 3) If uploads succeed, then delete old/removed keys from R2 (including thumbnailKey)
+ * 4) Commit DB changes and save property
+ * 5) Cleanup all local temp files. If any step fails before commit, rollback uploaded keys and cleanup local files, do not save.
  */
 const updateProperty = async (req, res) => {
+  // Tracking arrays for rollback / cleanup
+  const r2UploadedKeys = []; // R2 keys uploaded in this operation (for rollback)
+  const localTempFiles = []; // local temp file paths to delete at the end
+  const pendingImageUpdates = []; // image objects to add to property if commit
+  const pendingVideoUpdates = []; // video objects to add to property if commit
+  const keysToDeleteAfterCommit = []; // old R2 keys to delete (removed or replaced), deleted after new uploads succeed
+  const thumbnailsToDeleteAfterCommit = []; // thumbnail keys to delete after commit
+
   try {
     const propertyId = req.params.id;
     const property = await Property.findById(propertyId);
@@ -342,45 +465,223 @@ const updateProperty = async (req, res) => {
         message: "Super admin user not found",
       });
     }
+
     // Remove empty string fields from req.body
     req.body = removeEmptyStrings(req.body);
 
-    // Always set agent to super_admin
+    // Always set agent to super_admin in memory; commit after success
     property.agent = superAdmin._id;
 
-     property.updatedBy = req.user?._id; // track who updated
+    // Set updatedBy
+    if (req.user && req.user._id) {
+      property.updatedBy = req.user._id;
+    }
 
     // Parse JSON fields safely
-    const replaceMap = safeParseObject(req.body.replaceMap, "replaceMap");
+    const replaceMap = safeParseObject(req.body.replaceMap, "replaceMap"); // { oldKey: newFileName }
     const removedImages = safeParseArray(
       req.body.removedImages,
       "removedImages"
-    );
+    ); // array of keys
     const removedVideos = safeParseArray(
       req.body.removedVideos,
       "removedVideos"
+    ); // array of keys
+
+    // Keep copies of original arrays so we only modify on commit
+    const originalImages = Array.isArray(property.images)
+      ? [...property.images]
+      : [];
+    const originalVideos = Array.isArray(property.videos)
+      ? [...property.videos]
+      : [];
+
+    // --- 1) PREPARE: find uploaded files from multer (they are in req.files.images / req.files.videos)
+    const uploadedImages = req.files?.images || [];
+    const uploadedVideos = req.files?.videos || [];
+
+    // 1A) Handle REPLACEMENTS: for each oldKey -> newFileName, find file in uploaded arrays and upload it
+    // We will not delete oldKey yet. We will upload new file to newKey and record oldKey for deletion after commits.
+    for (const [oldKey, newFileName] of Object.entries(replaceMap || {})) {
+      // find file in uploaded images or videos
+      const uploadedFile =
+        uploadedImages.find(
+          (f) =>
+            f.originalname === newFileName && !localTempFiles.includes(f.path)
+        ) ||
+        uploadedVideos.find(
+          (f) =>
+            f.originalname === newFileName && !localTempFiles.includes(f.path)
+        );
+
+      if (!uploadedFile) {
+        // If replacement mapping references a file that wasn't uploaded, that's an error.
+        throw new Error(
+          `Replacement file "${newFileName}" for "${oldKey}" not found in uploaded files.`
+        );
+      }
+
+      // Decide image or video by mimetype
+      if (uploadedFile.mimetype.startsWith("image/")) {
+        // image replacement
+        const result = await processImageUpload({
+          file: uploadedFile,
+          propertyId,
+          r2UploadedKeys,
+          localTempFiles,
+        });
+        pendingImageUpdates.push(result); // { key }
+        // Record old key for deletion after commit (and remove the old from originalImages at commit time)
+        keysToDeleteAfterCommit.push(oldKey);
+      } else {
+        // video replacement: upload new video + thumbnail
+        const result = await processVideoUpload({
+          file: uploadedFile,
+          propertyId,
+          r2UploadedKeys,
+          localTempFiles,
+        });
+        pendingVideoUpdates.push(result); // { key, thumbnailKey }
+        // find the original video entry to get its thumbnailKey to delete after commit
+        const oldVideo = originalVideos.find((v) => v.key === oldKey);
+        if (oldVideo?.thumbnailKey)
+          thumbnailsToDeleteAfterCommit.push(oldVideo.thumbnailKey);
+        keysToDeleteAfterCommit.push(oldKey);
+      }
+    }
+
+    // 1B) Handle NEW uploads (images & videos) - any files not used for replacements
+    // determine which uploaded files are used in replaceMap (we marked localTempFiles with file paths, but better to track used files)
+    const usedUploadedPaths = new Set(localTempFiles); // processImageUpload/processVideoUpload added file.path to localTempFiles
+    // For images:
+    for (const file of uploadedImages) {
+      if (usedUploadedPaths.has(file.path)) continue; // already processed as replacement
+      const result = await processImageUpload({
+        file,
+        propertyId,
+        r2UploadedKeys,
+        localTempFiles,
+      });
+      pendingImageUpdates.push(result);
+    }
+
+    // For videos:
+    for (const file of uploadedVideos) {
+      if (usedUploadedPaths.has(file.path)) continue; // already processed as replacement
+      const result = await processVideoUpload({
+        file,
+        propertyId,
+        r2UploadedKeys,
+        localTempFiles,
+      });
+      pendingVideoUpdates.push(result);
+    }
+
+    // If we've reached here, all new uploads succeeded. Now we can safely delete old keys requested to be removed or replaced.
+    // --- 2) Perform deletions of removedImages & removedVideos and old replacement keys (including thumbnails) ---
+    // Note: Deletions are attempted; if any deletion fails we log it but continue (because we already have new files uploaded and can still commit).
+    // If you want stricter behavior (abort on deletion failure), throw to rollback instead.
+
+    // Collect removals from user request
+    // removedImages: keys to remove from property.images
+    for (const key of removedImages) {
+      try {
+        await deleteFile(key);
+        // remove from originalImages
+        const idx = originalImages.findIndex((i) => i.key === key);
+        if (idx !== -1) originalImages.splice(idx, 1);
+      } catch (err) {
+        console.error(
+          `Failed to delete removed image key ${key} from R2:`,
+          err
+        );
+        // continue
+      }
+    }
+
+    // removedVideos: keys to remove from property.videos (delete thumbnail if exists)
+    for (const key of removedVideos) {
+      try {
+        const vid = originalVideos.find((v) => v.key === key);
+        if (vid?.thumbnailKey) {
+          try {
+            await deleteFile(vid.thumbnailKey);
+          } catch (err) {
+            console.error(
+              `Failed to delete thumbnail ${vid.thumbnailKey} for removed video ${key}:`,
+              err
+            );
+          }
+        }
+        await deleteFile(key);
+        // remove from originalVideos
+        const idx = originalVideos.findIndex((v) => v.key === key);
+        if (idx !== -1) originalVideos.splice(idx, 1);
+      } catch (err) {
+        console.error(
+          `Failed to delete removed video key ${key} from R2:`,
+          err
+        );
+        // continue
+      }
+    }
+
+    // Old replacement keys (we recorded earlier) - delete them
+    for (const key of keysToDeleteAfterCommit) {
+      try {
+        // Find if this key corresponds to a video in original videos -> then delete its thumbnail too (we queued thumbnails separately earlier)
+        const vid = originalVideos.find((v) => v.key === key);
+        if (vid?.thumbnailKey) {
+          try {
+            await deleteFile(vid.thumbnailKey);
+          } catch (err) {
+            console.error(
+              `Failed to delete thumbnail ${vid.thumbnailKey} for replaced video ${key}:`,
+              err
+            );
+          }
+        }
+
+        await deleteFile(key);
+        // remove from originalImages/originalVideos
+        let idx = originalImages.findIndex((i) => i.key === key);
+        if (idx !== -1) originalImages.splice(idx, 1);
+        idx = originalVideos.findIndex((v) => v.key === key);
+        if (idx !== -1) originalVideos.splice(idx, 1);
+      } catch (err) {
+        console.error(
+          `Failed to delete replacement old key ${key} from R2:`,
+          err
+        );
+        // continue - already uploaded new files; leaving orphaned old files is not great but we don't want to rollback uploaded new content.
+      }
+    }
+
+    // Also process thumbnailsToDeleteAfterCommit (some may be duplicates; safe)
+    for (const thumbKey of thumbnailsToDeleteAfterCommit) {
+      try {
+        await deleteFile(thumbKey);
+      } catch (err) {
+        console.error(`Failed to delete thumbnailKey ${thumbKey}:`, err);
+      }
+    }
+
+    // --- 3) Commit to property object in memory (only now) ---
+    // Remove any images/videos whose keys were removed by client or replaced (we already spliced originals)
+    property.images = originalImages;
+    property.videos = originalVideos;
+
+    // Append newly uploaded images & videos
+    // pendingImageUpdates items are { key }
+    pendingImageUpdates.forEach((img) =>
+      property.images.push({ key: img.key })
+    );
+    // pendingVideoUpdates items are { key, thumbnailKey }
+    pendingVideoUpdates.forEach((vid) =>
+      property.videos.push({ key: vid.key, thumbnailKey: vid.thumbnailKey })
     );
 
-    // 1️⃣ Remove old images/videos
-    await handleRemovals(property, removedImages, removedVideos);
-
-    // 2️⃣ Handle replacements
-    const usedFiles = await handleReplacements(
-      property,
-      replaceMap,
-      req.files.images || [],
-      req.files.videos || []
-    );
-
-    // 3️⃣ Handle new uploads
-    await handleNewUploads(
-      property,
-      req.files.images || [],
-      req.files.videos || [],
-      usedFiles
-    );
-
-    // 4️⃣ Update other fields (except agent)
+    // 4) Update other fields (except agent)
     const ignoredKeys = [
       "removedImages",
       "removedVideos",
@@ -388,129 +689,77 @@ const updateProperty = async (req, res) => {
       "images",
       "videos",
       "agent",
+      "createdBy",
+      "updatedBy",
     ];
     Object.keys(req.body).forEach((key) => {
       if (!ignoredKeys.includes(key)) property[key] = req.body[key];
     });
 
+    // Save property
     await property.save();
+
+    // 5) Cleanup local temp files now that everything succeeded
+    for (const p of localTempFiles) {
+      try {
+        safeDeleteSync(p);
+      } catch (err) {
+        console.error(
+          "Failed to delete local temp file during cleanup:",
+          p,
+          err
+        );
+      }
+    }
 
     res.json({ success: true, data: property });
   } catch (error) {
-    console.error("Update Property Error:", error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
+    console.error("Update Property Error (will rollback):", error);
 
-// Remove old files
-const handleRemovals = async (property, removedImages, removedVideos) => {
-  for (const key of removedImages) {
-    await deleteFile(key);
-    property.images = property.images.filter((img) => img.key !== key);
-  }
- for (const key of removedVideos) {
-   const vid = property.videos.find((v) => v.key === key);
-   if (vid?.thumbnailKey) await deleteFile(vid.thumbnailKey); // delete thumbnail
-   await deleteFile(key); // delete video
-   property.videos = property.videos.filter((v) => v.key !== key);
- }
-};
-
-// Handle replacements
-const handleReplacements = async (
-  property,
-  replaceMap,
-  uploadedImages,
-  uploadedVideos
-) => {
-  const usedFiles = new Set();
-
-  for (const [oldKey, newFileName] of Object.entries(replaceMap)) {
-    // Delete old file
-    await deleteFile(oldKey);
-
-    // Remove from property arrays
-    property.images = property.images.filter((img) => img.key !== oldKey);
-    property.videos = property.videos.filter((vid) => vid.key !== oldKey);
-
-    // Find the new file object
-    const newFile =
-      uploadedImages.find((f) => f.originalname === newFileName && !usedFiles.has(f)) ||
-      uploadedVideos.find((f) => f.originalname === newFileName && !usedFiles.has(f));
-
-    if (newFile) {
-      usedFiles.add(newFile);
-
-      const isImage = newFile.mimetype.startsWith("image/");
-      const folder = isImage ? "images" : "videos";
-      const newKey = `properties/${property._id}/${folder}/${Date.now()}-${newFile.originalname}`;
-
-      if (isImage) {
-        // For images: just upload
-        await uploadBuffer(newFile.buffer, newKey, newFile.mimetype);
-        property.images.push({ key: newKey });
-      } else {
-        // For videos: generate/upload thumbnail FIRST
-        const thumbBuffer = await generateVideoThumbnail(newFile.buffer, newFile.originalname);
-        const baseName = newFile.originalname.replace(/\.[^/.]+$/, "");
-        const thumbKey = `properties/${property._id}/videos/thumbnails/${Date.now()}-${baseName}-thumbnail.png`;
-        await uploadBuffer(thumbBuffer, thumbKey, "image/png");
-
-        // Only if thumbnail is ok, upload video
-        await uploadBuffer(newFile.buffer, newKey, newFile.mimetype);
-
-        property.videos.push({ key: newKey, thumbnailKey: thumbKey });
+    // Rollback: delete any new R2 keys uploaded during this operation
+    try {
+      if (r2UploadedKeys.length > 0) {
+        await Promise.all(
+          r2UploadedKeys.map(async (k) => {
+            try {
+              await deleteFile(k);
+            } catch (err) {
+              console.error(
+                `Rollback: failed to delete uploaded R2 key ${k}:`,
+                err
+              );
+            }
+          })
+        );
       }
-    }
-  }
-
-  return usedFiles;
-};
-
-/**
- * Handle new uploads for property images and videos
- * @param {*} property 
- * @param {*} uploadedImages 
- * @param {*} uploadedVideos 
- * @param {*} usedFiles 
- */
-const handleNewUploads = async (property, uploadedImages, uploadedVideos, usedFiles) => {
-  // Images
-  const newImages = uploadedImages.filter((f) => !usedFiles.has(f));
-  for (const file of newImages) {
-    const key = `properties/${property._id}/images/${Date.now()}-${file.originalname}`;
-    await uploadBuffer(file.buffer, key, file.mimetype);
-    property.images.push({ key });
-  }
-
-  // Videos
-  const newVideos = uploadedVideos.filter((f) => !usedFiles.has(f));
-  for (const file of newVideos) {
-    let videoBuffer = file.buffer;
-    let videoName = file.originalname;
-    // Convert to mp4 if not already
-    if (file.mimetype !== "video/mp4") {
-      videoBuffer = await convertToMp4(videoBuffer, videoName);
-      videoName = videoName.replace(/\.[^/.]+$/, ".mp4");
+    } catch (err) {
+      console.error("Rollback R2 deletion error:", err);
     }
 
-    const baseName = videoName.replace(/\.[^/.]+$/, "");
-    const thumbKey = `properties/${property._id}/videos/thumbnails/${Date.now()}-${baseName}-thumbnail.png`;
+    // Cleanup local temp files
+    try {
+      for (const p of localTempFiles) {
+        try {
+          safeDeleteSync(p);
+        } catch (err) {
+          console.error("Rollback: failed to delete local temp file:", p, err);
+        }
+      }
+    } catch (err) {
+      console.error("Rollback local cleanup error:", err);
+    }
 
-    // Generate/upload thumbnail FIRST
-    const thumbBuffer = await generateVideoThumbnail(videoBuffer, videoName);
-    await uploadBuffer(thumbBuffer, thumbKey, "image/png");
-
-    // If thumbnail succeeded, upload video
-    const key = `properties/${property._id}/videos/${Date.now()}-${videoName}`;
-    await uploadBuffer(videoBuffer, key, "video/mp4");
-
-    property.videos.push({ key, thumbnailKey: thumbKey });
+    return res
+      .status(500)
+      .json({
+        success: false,
+        message: error.message || "Update failed and rollback executed",
+      });
   }
 };
 
 /**
- * @desc    Upload images for existing property
+ * Upload images for existing property
  * @route   POST /api/properties/:id/images
  * @access  Private
  */
@@ -520,54 +769,74 @@ const uploadPropertyImages = async (req, res) => {
       _id: req.params.id,
       isDeleted: false,
     });
-    if (!property) {
+    if (!property)
       return res
         .status(404)
         .json({ success: false, message: "Property not found" });
-    }
 
-    // ✅ Just take all files (multer already gives you array of files if multiple uploaded)
     const files = req.files;
-    if (!files || files.length === 0) {
+    if (!files || files.length === 0)
       return res
         .status(400)
         .json({ success: false, message: "No images provided" });
-    }
 
-    const propertyId = property._id.toString();
     if (!property.images) property.images = [];
 
-    // ✅ Loop over all images
-    for (const file of files) {
-      const imageKey = `properties/${propertyId}/images/${Date.now()}-${
-        file.originalname
-      }`;
-      await uploadBuffer(file.buffer, imageKey, file.mimetype);
-      property.images.push({
-        key: imageKey,
-      });
-    }
+    // Tracking for rollback within this endpoint
+    const r2UploadedKeys = [];
+    const localTempFiles = [];
 
-    await property.save();
-    res.status(200).json({
-      success: true,
-      message: `${files.length} images uploaded successfully`,
-      data: property.images,
-    });
+    try {
+      for (const file of files) {
+        const imageKey = `properties/${property._id}/images/${Date.now()}-${
+          file.originalname
+        }`;
+        localTempFiles.push(file.path);
+        await uploadFileToR2(file.path, imageKey, file.mimetype);
+        r2UploadedKeys.push(imageKey);
+
+        // Update property image list in memory (safe to do here)
+        property.images.push({ key: imageKey });
+
+        // Delete local temp file immediately (we'll still track it to ensure cleanup on error)
+        safeDeleteSync(file.path);
+      }
+
+      await property.save();
+
+      res.status(200).json({
+        success: true,
+        message: `${files.length} images uploaded successfully`,
+        data: property.images,
+      });
+    } catch (err) {
+      // rollback any uploaded keys
+      await Promise.all(
+        r2UploadedKeys.map(async (k) => {
+          try {
+            await deleteFile(k);
+          } catch (err2) {
+            console.error("Rollback failed to delete key:", k, err2);
+          }
+        })
+      );
+      // cleanup local files
+      for (const p of localTempFiles) safeDeleteSync(p);
+
+      throw err;
+    }
   } catch (error) {
     console.error("Upload images error:", error);
-    res
-      .status(500)
-      .json({
-        success: false,
-        message: "Failed to upload images",
-        error: error.message,
-      });
+    res.status(500).json({
+      success: false,
+      message: "Failed to upload images",
+      error: error.message,
+    });
   }
 };
 
 /**
- * @desc    Upload videos for existing property
+ * Upload videos for existing property
  * @route   POST /api/properties/:id/videos
  * @access  Private
  */
@@ -577,96 +846,114 @@ const uploadPropertyVideos = async (req, res) => {
       _id: req.params.id,
       isDeleted: false,
     });
-    if (!property) {
-      return res.status(404).json({ success: false, message: 'Property not found' });
-    }
+    if (!property)
+      return res
+        .status(404)
+        .json({ success: false, message: "Property not found" });
 
-    if (!req.files || !req.files.videos || req.files.videos.length === 0) {
-      return res.status(400).json({ success: false, message: "No videos provided" });
-    }
+    const videos = req.files?.videos || [];
+    if (videos.length === 0)
+      return res
+        .status(400)
+        .json({ success: false, message: "No videos provided" });
 
-    const propertyId = property._id.toString();
     if (!property.videos) property.videos = [];
 
-    for (const file of req.files.videos) {
-       let videoBuffer = file.buffer;
-       let videoName = file.originalname;
+    // Tracking for rollback within this endpoint
+    const r2UploadedKeys = [];
+    const localTempFiles = [];
 
-       // Convert to mp4 if not already
-       if (file.mimetype !== "video/mp4") {
-         videoBuffer = await convertToMp4(file.buffer, file.originalname);
-         videoName = file.originalname.replace(/\.[^/.]+$/, ".mp4");
-       }
+    try {
+      for (const file of videos) {
+        // Use processVideoUpload helper which handles conversion and thumbnail generation and tracks local files
+        const result = await processVideoUpload({
+          file,
+          propertyId: property._id,
+          r2UploadedKeys,
+          localTempFiles,
+        });
 
-      // Generate thumbnail
-      const thumbBuffer = await generateVideoThumbnail(
-        videoBuffer,
-        videoName
-      );
-      const baseName = videoName.replace(/\.[^/.]+$/, "");
-      const thumbKey = `properties/${
-        property._id
-      }/videos/thumbnails/${Date.now()}-${baseName}-thumbnail.png`;
-      await uploadBuffer(thumbBuffer, thumbKey, "image/png");
+        // Add to property in memory
+        property.videos.push({
+          key: result.key,
+          thumbnailKey: result.thumbnailKey,
+        });
 
-      // Directly upload the video
-      const videoKey = `properties/${propertyId}/videos/${Date.now()}-${
-        videoName
-      }`;
-      await uploadBuffer(videoBuffer, videoKey, "video/mp4");
+        // cleanup local temp files for this video - we will still track localTempFiles for rollback safety
+        // but safeDeleteSync will remove immediately where possible
+        // (processVideoUpload already pushed file paths to localTempFiles)
+      }
 
+      await property.save();
 
-      // Save both video and thumbnail keys in property
-      property.videos.push({
-        key: videoKey,
-        thumbnailKey: thumbKey,
+      // After successful save, cleanup local temp files
+      for (const p of localTempFiles) safeDeleteSync(p);
+
+      res.status(200).json({
+        success: true,
+        message: "Videos uploaded successfully",
+        data: property.videos,
       });
-    }
+    } catch (err) {
+      // rollback any uploaded keys
+      await Promise.all(
+        r2UploadedKeys.map(async (k) => {
+          try {
+            await deleteFile(k);
+          } catch (err2) {
+            console.error("Rollback failed to delete key:", k, err2);
+          }
+        })
+      );
+      // cleanup local files
+      for (const p of localTempFiles) safeDeleteSync(p);
 
-    await property.save();
-    res.status(200).json({ success: true, message: "Videos uploaded successfully", data: property.videos });
+      throw err;
+    }
   } catch (error) {
     console.error("Upload videos error:", error);
-    res.status(500).json({ success: false, message: "Failed to upload videos", error: error.message });
+    res.status(500).json({
+      success: false,
+      message: "Failed to upload videos",
+      error: error.message,
+    });
   }
 };
 
 /**
- * @desc    Delete property
+ * @desc    Delete property (soft delete)
  * @route   DELETE /api/properties/:id
  * @access  Private
  */
 const deleteProperty = async (req, res) => {
   try {
-   const property = await Property.findByIdAndUpdate(
-     req.params.id,
-     { isDeleted: true },
-     { new: true, runValidators: true } // returns the updated doc
-   );
+    const property = await Property.findByIdAndUpdate(
+      req.params.id,
+      { isDeleted: true },
+      { new: true, runValidators: true } // returns the updated doc
+    );
 
     if (!property) {
       return res.status(404).json({
         success: false,
-        message: 'Property not found'
+        message: "Property not found",
       });
     }
 
-    // Access control is handled by route middleware (admin/super_admin only)
-
-    // Soft delete
+    // Soft delete (ensured above)
     property.isDeleted = true;
     await property.save();
 
     res.status(200).json({
       success: true,
-      message: 'Property deleted successfully'
+      message: "Property deleted successfully",
     });
   } catch (error) {
-    console.error('Delete property error:', error);
+    console.error("Delete property error:", error);
     res.status(500).json({
       success: false,
-      message: 'Failed to delete property',
-      error: error.message
+      message: "Failed to delete property",
+      error: error.message,
     });
   }
 };

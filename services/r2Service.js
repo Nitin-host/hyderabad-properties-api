@@ -22,6 +22,21 @@ const R2_BUCKET = process.env.R2_BUCKET_NAME;
 const urlCache = new Map();
 const URL_CACHE_TTL = 3600000; // 1 hour in milliseconds
 
+async function uploadStream(
+  stream,
+  key,
+  contentType
+) {
+  const command = new PutObjectCommand({
+    Bucket: R2_BUCKET,
+    Key: key,
+    Body: stream,
+    ContentType: contentType || "application/octet-stream",
+  });
+  await r2.send(command);
+  return { key };
+}
+
 // Upload buffer
 async function uploadBuffer(
   buffer,
@@ -82,4 +97,4 @@ setInterval(() => {
   }
 }, 60000); // Run every minute
 
-module.exports = { uploadBuffer, getPresignedUrl, deleteFile };
+module.exports = {uploadStream, uploadBuffer, getPresignedUrl, deleteFile };
