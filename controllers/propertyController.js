@@ -14,7 +14,8 @@ const fs = require("fs");
 const { convertToMp4 } = require("../services/VideoConvertor");
 
 // --- Temp folder setup ---
-const uploadTempFolder = path.join(__dirname, "../tempUploads");
+// const uploadTempFolder = path.join(__dirname, "../tempUploads");
+const uploadTempFolder = process.env.TEMP_UPLOAD_PATH || path.join(__dirname, "../tempUploads");
 if (!fs.existsSync(uploadTempFolder)) fs.mkdirSync(uploadTempFolder);
 
 // --- Multer disk storage ---
