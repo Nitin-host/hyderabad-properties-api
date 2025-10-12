@@ -4,7 +4,7 @@ const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const compression = require('compression');
 // const apicache = require('apicache');
-const logger = require('./services/loggerService');
+// const logger = require('./services/loggerService');
 const { apiLimiter, authLimiter } = require('./middleware/rateLimiter');
 
 // Load env vars
