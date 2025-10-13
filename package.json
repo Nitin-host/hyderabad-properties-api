@@ -4,7 +4,7 @@
   "description": "House broker web application with social media integration",
   "main": "server.js",
   "scripts": {
-    "start": "NODE_ENV=production node server.js",
+    "start": "NODE_ENV=production node --expose-gc server.js",
     "dev": "nodemon server.js",
     "postinstall": "chmod +x ./node_modules/@ffprobe-installer/linux-x64/ffprobe"
   },
@@ -22,7 +22,6 @@
     "@aws-sdk/client-s3": "^3.895.0",
     "@aws-sdk/s3-request-presigner": "^3.896.0",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
-    "@ffprobe-installer/ffprobe": "^2.1.2",
     "@sendinblue/client": "^3.3.1",
     "apicache": "^1.6.3",
     "axios": "^1.11.0",
