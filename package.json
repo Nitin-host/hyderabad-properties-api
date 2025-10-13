@@ -5,8 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "NODE_ENV=production node --expose-gc server.js",
-    "dev": "nodemon server.js",
-    "postinstall": "chmod +x ./node_modules/@ffprobe-installer/linux-x64/ffprobe"
+    "dev": "nodemon server.js"
   },
   "keywords": [
     "real estate",
