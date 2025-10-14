@@ -4,13 +4,6 @@ const path = require("path");
 const ffmpegInstaller = require("@ffmpeg-installer/ffmpeg");
 const ffmpegPath = ffmpegInstaller.path;
 
-/**
- * Generate a video thumbnail and return its path.
- * RAM-optimized using child_process.spawn()
- * @param {string} videoPath - Path to the video file
- * @param {string} outputDir - Directory to temporarily save thumbnail
- * @returns {Promise<string>} - Path of the generated thumbnail
- */
 const THUMBNAIL_DIR = process.env.THUMBNAIL_DIR || "uploads/video-thumbnails";
 
 const generateVideoThumbnail = (videoPath, outputDir = THUMBNAIL_DIR) => {
@@ -24,28 +17,39 @@ const generateVideoThumbnail = (videoPath, outputDir = THUMBNAIL_DIR) => {
         formatBytes(process.memoryUsage().rss)
       );
 
-      // Ensure output directory exists
       fs.mkdirSync(outputDir, { recursive: true });
 
       const baseName = path.parse(videoPath).name;
       const thumbnailPath = path.join(
         outputDir,
-        `${Date.now()}-${baseName}-thumbnail.png`
+        `${Date.now()}-${baseName}-thumbnail.jpg` // ✅ Use JPG for lightweight thumbnail
       );
 
-      // Spawn ffmpeg to extract thumbnail
+      // ✅ FAST SEEK before -i (prevents keyframe warnings)
+      // ✅ JPG instead of PNG (smaller & faster)
+      // ✅ Skip audio and unnecessary decoding
+      // ✅ Clean logs for production
       const ffmpeg = spawn(
         ffmpegPath,
         [
           "-y",
+          "-loglevel",
+          "error", // ✅ Hide logs except real errors
+          "-ss",
+          "00:00:03", // ✅ Fast seek (no missing keyframe warnings)
+          "-skip_frame",
+          "nokey", // ✅ Skip non-keyframes to speed up
           "-i",
           videoPath,
-          "-ss",
-          "00:00:03",
+          "-an", // ✅ Disable audio processing completely
           "-vframes",
           "1",
-          "-q:v",
+          "-vf",
+          "scale='if(gt(iw,1280),1280,iw)':-1", // ✅ Smart scaling (no upscale)
+          "-vsync",
           "2",
+          "-q:v",
+          "3", // ✅ Good quality thumbnail (1 = best, 31 = worst)
           thumbnailPath,
         ],
         { stdio: ["ignore", "inherit", "inherit"] }
