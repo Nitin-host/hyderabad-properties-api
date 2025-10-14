@@ -338,7 +338,21 @@ router.get(
       const range = req.query.range || "month";
       const now = new Date();
 
-      // Overview stats
+      // ✅ Function to get date range of ISO week
+      function getDateRangeOfISOWeek(week, year) {
+        const simple = new Date(year, 0, 1 + (week - 1) * 7);
+        const ISOWeekStart = new Date(simple);
+        if (simple.getDay() <= 4) {
+          ISOWeekStart.setDate(simple.getDate() - simple.getDay() + 1);
+        } else {
+          ISOWeekStart.setDate(simple.getDate() + 8 - simple.getDay());
+        }
+        const ISOWeekEnd = new Date(ISOWeekStart);
+        ISOWeekEnd.setDate(ISOWeekStart.getDate() + 6);
+        return { start: ISOWeekStart, end: ISOWeekEnd };
+      }
+
+      // 1️⃣ Overview aggregation
       const overviewAgg = await Property.aggregate([
         {
           $group: {
@@ -350,48 +364,6 @@ router.get(
             deletedProperties: {
               $sum: { $cond: [{ $eq: ["$isDeleted", true] }, 1, 0] },
             },
-            availableProperties: {
-              $sum: {
-                $cond: [
-                  {
-                    $and: [
-                      { $eq: ["$status", "Available"] },
-                      { $eq: ["$isDeleted", false] },
-                    ],
-                  },
-                  1,
-                  0,
-                ],
-              },
-            },
-            soldProperties: {
-              $sum: {
-                $cond: [
-                  {
-                    $and: [
-                      { $eq: ["$status", "Sold"] },
-                      { $eq: ["$isDeleted", false] },
-                    ],
-                  },
-                  1,
-                  0,
-                ],
-              },
-            },
-            rentedProperties: {
-              $sum: {
-                $cond: [
-                  {
-                    $and: [
-                      { $eq: ["$status", "Rented"] },
-                      { $eq: ["$isDeleted", false] },
-                    ],
-                  },
-                  1,
-                  0,
-                ],
-              },
-            },
             averagePrice: { $avg: "$price" },
             totalImagesUploaded: { $sum: { $size: "$images" } },
             totalVideosUploaded: { $sum: { $size: "$videos" } },
@@ -399,40 +371,55 @@ router.get(
         },
       ]);
 
-      const totalProperties = overviewAgg[0]?.totalProperties || 0;
+      const overview = overviewAgg[0] || {};
+      const totalProperties = overview.totalProperties || 0;
 
-      // Property Type Distribution with percentages
-      const propertyTypeStatsRaw = await Property.aggregate([
+      // 2️⃣ Dynamic type distribution
+      const propertyTypeAgg = await Property.aggregate([
         { $match: { isDeleted: false } },
         { $group: { _id: "$propertyType", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]);
 
-      const propertyTypeDistribution = propertyTypeStatsRaw.map((p) => ({
-        _id: p._id,
+      const propertyTypeDistribution = propertyTypeAgg.map((p) => ({
+        type: p._id,
         count: p.count,
         percentage: totalProperties
           ? ((p.count / totalProperties) * 100).toFixed(1)
           : 0,
       }));
 
-      // Status Distribution with percentages
-      const statusStats = [
+      // 3️⃣ Dynamic status distribution
+      const statusAgg = await Property.aggregate([
+        { $match: { isDeleted: false } },
         {
-          status: "Available",
-          count: overviewAgg[0]?.availableProperties || 0,
+          $group: {
+            _id: { $toLower: "$status" },
+            originalStatuses: { $addToSet: "$status" },
+            count: { $sum: 1 },
+          },
         },
-        { status: "Sold", count: overviewAgg[0]?.soldProperties || 0 },
-        { status: "Rented", count: overviewAgg[0]?.rentedProperties || 0 },
-        { status: "Deleted", count: overviewAgg[0]?.deletedProperties || 0 },
-      ].map((s) => ({
-        ...s,
+      ]);
+
+      let statusStats = statusAgg.map((s) => ({
+        status: s.originalStatuses[0],
+        count: s.count,
         percentage: totalProperties
           ? ((s.count / totalProperties) * 100).toFixed(1)
           : 0,
       }));
 
-      // Time-based stats
+      if (overview.deletedProperties > 0) {
+        statusStats.push({
+          status: "Deleted",
+          count: overview.deletedProperties,
+          percentage: totalProperties
+            ? ((overview.deletedProperties / totalProperties) * 100).toFixed(1)
+            : 0,
+        });
+      }
+
+      // 4️⃣ Time range filter logic
       let match = {};
       if (range === "week") {
         const last12Weeks = new Date();
@@ -448,6 +435,7 @@ router.get(
         match.createdAt = { $gte: last5Years };
       }
 
+      // Group logic
       let groupId;
       if (range === "week")
         groupId = {
@@ -461,30 +449,57 @@ router.get(
         };
       else groupId = { year: { $year: "$createdAt" } };
 
-      const timeStats = await Property.aggregate([
+      // 5️⃣ Aggregation
+      let creationStats = await Property.aggregate([
         { $match: match },
         { $group: { _id: groupId, count: { $sum: 1 } } },
         { $sort: { "_id.year": 1, "_id.month": 1, "_id.week": 1 } },
       ]);
 
+      // ✅ Format stats with pretty labels
+      const formattedCreationStats = creationStats.map((item) => {
+        if (item._id.week) {
+          const { start, end } = getDateRangeOfISOWeek(
+            item._id.week,
+            item._id.year
+          );
+          const label = `${start.toLocaleString("en-US", {
+            month: "short",
+          })} ${start.getDate()} - ${end.toLocaleString("en-US", {
+            month: "short",
+          })} ${end.getDate()}, ${item._id.year}`;
+          return { ...item, label };
+        }
+
+        if (item._id.month) {
+          const monthName = new Date(
+            item._id.year,
+            item._id.month - 1,
+            1
+          ).toLocaleString("en-US", { month: "short" });
+          return { ...item, label: `${monthName} ${item._id.year}` };
+        }
+
+        return { ...item, label: `${item._id.year}` };
+      });
+
+      // ✅ Return response
       res.status(200).json({
         success: true,
         data: {
-          overview: overviewAgg[0] || {},
+          overview,
           propertyTypeDistribution,
           statusDistribution: statusStats,
-          creationStats: timeStats,
+          creationStats: formattedCreationStats,
         },
       });
     } catch (error) {
       console.error(error);
-      res
-        .status(500)
-        .json({
-          success: false,
-          message: "Failed to get stats",
-          error: error.message,
-        });
+      res.status(500).json({
+        success: false,
+        message: "Failed to get stats",
+        error: error.message,
+      });
     }
   }
 );
