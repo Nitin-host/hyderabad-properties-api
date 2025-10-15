@@ -112,27 +112,21 @@ async function processVideoUpload({
   let finalName = file.originalname;
 
   // convert to mp4 if needed
-  if (file.mimetype !== "video/mp4") {
-    const convertedPath = await convertToMp4(file.path, file.originalname);
-    // track converted path for cleanup
-    localTempFiles.push(convertedPath);
-    // delete original upload later (we tracked)
-    videoPath = convertedPath;
-    finalName = finalName.replace(/\.[^/.]+$/, ".mp4");
+ if (file.mimetype !== 'video/mp4') {
+    const { outputPath, finalName: convertedName } = await convertToMp4(file.path, file.originalname, { deleteOriginal:false });
+    localTempFiles.push(outputPath);
+    videoPath = outputPath;
+    finalName = convertedName;
   }
 
-  // generate thumbnail
   const thumbPath = await generateVideoThumbnail(videoPath);
-  if (!fs.existsSync(thumbPath)) {
-    throw new Error("Thumbnail generation failed");
-  }
-  // track thumbnail for cleanup
-  localTempFiles.push(thumbPath);
-
-  const baseName = path.parse(finalName).name;
-  const videoKey = `properties/${propertyId}/videos/${Date.now()}-${finalName}`;
-  const thumbKey = `properties/${propertyId}/videos/thumbnails/${Date.now()}-${baseName}-thumbnail.png`;
-
+   localTempFiles.push(thumbPath);
+ 
+   const timestamp = Date.now();
+   const baseName = path.parse(finalName).name;
+   const videoKey = `properties/${propertyId}/videos/${timestamp}-${finalName}`;
+   const thumbFileName = `${timestamp}-${baseName}.png`;
+   const thumbKey = `properties/${propertyId}/videos/thumbnails/${thumbFileName}`;
   // upload thumbnail first (so if video upload fails we can delete thumbnail)
   await uploadFileToR2(thumbPath, thumbKey, "image/png");
   r2UploadedKeys.push(thumbKey);
@@ -511,13 +505,15 @@ const updateProperty = async (req, res) => {
     const effectiveExistingImages = existingImagesCount - removedImages.length;
     const effectiveExistingVideos = existingVideosCount - removedVideos.length;
 
+    const replaceCount = Object.keys(replaceMap || {}).length;
+
     const totalImagesAfterUpload =
-      effectiveExistingImages + uploadedImagesCount;
+      effectiveExistingImages + uploadedImagesCount - replaceCount;
     const totalVideosAfterUpload =
-      effectiveExistingVideos + uploadedVideosCount;
+      effectiveExistingVideos + uploadedVideosCount - replaceCount;
 
     // ✅ IMAGE LIMIT CHECK
-    if (totalImagesAfterUpload > 10) {
+    if (totalImagesAfterUpload > 20) {
       // Cleanup temp uploaded image files from multer if any
       if (req.files?.images) {
         req.files.images.forEach((file) => {
@@ -565,10 +561,15 @@ const updateProperty = async (req, res) => {
         );
 
       if (!uploadedFile) {
+        //remove the files we already uploaded
+        try{
+          safeDeleteSync(uploadedFile.path);
+        }catch(err){}
         // If replacement mapping references a file that wasn't uploaded, that's an error.
         throw new Error(
           `Replacement file "${newFileName}" for "${oldKey}" not found in uploaded files.`
         );
+        
       }
 
       // Decide image or video by mimetype
@@ -836,7 +837,7 @@ const uploadPropertyImages = async (req, res) => {
     const r2UploadedKeys = [];
     const localTempFiles = [];
 
-    if (req.files?.length > 10) {
+    if (req.files?.length > 20) {
       // Cleanup temp local files
       req.files.forEach((file) => {
         try {

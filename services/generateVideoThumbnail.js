@@ -1,86 +1,22 @@
-const { spawn } = require("child_process");
-const fs = require("fs");
-const path = require("path");
-const ffmpegInstaller = require("@ffmpeg-installer/ffmpeg");
-const ffmpegPath = ffmpegInstaller.path;
+// -----------------------------------------------------
+// generateVideoThumbnail.js
 
-const THUMBNAIL_DIR = process.env.THUMBNAIL_DIR || "uploads/video-thumbnails";
+const { runFfmpeg: runFfmpeg2, ensureDir: ensureDir2 } = require('./FfmpegHelper');
+const path2 = require('path');
 
-const generateVideoThumbnail = (videoPath, outputDir = THUMBNAIL_DIR) => {
-  return new Promise((resolve, reject) => {
-    try {
-      if (!fs.existsSync(videoPath))
-        return reject(new Error("Video file does not exist"));
+async function generateVideoThumbnail(videoPath, options={}) {
+  const outputDir = options.outputDir || process.env.THUMBNAIL_DIR || 'uploads/video-thumbnails';
+  const timestamp = options.timestamp || '00:00:03';
+  const deleteOriginal = options.deleteOriginal === true;
+  await ensureDir2(outputDir);
 
-      console.log(
-        "RAM before generateVideoThumbnail:",
-        formatBytes(process.memoryUsage().rss)
-      );
+  const baseName = path2.parse(videoPath).name.replace(/[^a-zA-Z0-9-_\.]/g,'_');
+  const thumbnailPath = path2.join(outputDir, `${Date.now()}-${baseName}.jpg`);
 
-      fs.mkdirSync(outputDir, { recursive: true });
+  await runFfmpeg2(['-y','-loglevel','error','-ss',timestamp,'-skip_frame','nokey','-i',videoPath,'-an','-vframes','1','-vf',"scale='if(gt(iw,1280),1280,iw)':-1",'-vsync','2','-q:v','3',thumbnailPath], { timeoutMs:2*60*1000 });
 
-      const baseName = path.parse(videoPath).name;
-      const thumbnailPath = path.join(
-        outputDir,
-        `${Date.now()}-${baseName}-thumbnail.jpg` // ✅ Use JPG for lightweight thumbnail
-      );
-
-      // ✅ FAST SEEK before -i (prevents keyframe warnings)
-      // ✅ JPG instead of PNG (smaller & faster)
-      // ✅ Skip audio and unnecessary decoding
-      // ✅ Clean logs for production
-      const ffmpeg = spawn(
-        ffmpegPath,
-        [
-          "-y",
-          "-loglevel",
-          "error", // ✅ Hide logs except real errors
-          "-ss",
-          "00:00:03", // ✅ Fast seek (no missing keyframe warnings)
-          "-skip_frame",
-          "nokey", // ✅ Skip non-keyframes to speed up
-          "-i",
-          videoPath,
-          "-an", // ✅ Disable audio processing completely
-          "-vframes",
-          "1",
-          "-vf",
-          "scale='if(gt(iw,1280),1280,iw)':-1", // ✅ Smart scaling (no upscale)
-          "-vsync",
-          "2",
-          "-q:v",
-          "3", // ✅ Good quality thumbnail (1 = best, 31 = worst)
-          thumbnailPath,
-        ],
-        { stdio: ["ignore", "inherit", "inherit"] }
-      );
-
-      ffmpeg.on("error", reject);
-      ffmpeg.on("close", (code) => {
-        if (code !== 0)
-          return reject(new Error(`FFmpeg exited with code ${code}`));
-        if (!fs.existsSync(thumbnailPath))
-          return reject(new Error("Thumbnail generation failed"));
-
-        console.log(
-          "RAM after generateVideoThumbnail:",
-          formatBytes(process.memoryUsage().rss)
-        );
-
-        resolve(thumbnailPath);
-      });
-    } catch (err) {
-      reject(err);
-    }
-  });
-};
-
-// Helper to format memory usage
-function formatBytes(bytes) {
-  const sizes = ["Bytes", "KB", "MB", "GB"];
-  if (bytes === 0) return "0 Bytes";
-  const i = parseInt(Math.floor(Math.log(bytes) / Math.log(1024)));
-  return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`;
+  if (deleteOriginal) safeDeleteSync(videoPath);
+  return thumbnailPath;
 }
 
 module.exports = { generateVideoThumbnail };
