@@ -40,6 +40,9 @@ router.get(
       const properties = await Property.find({ isDeleted: true })
         .populate("agent", "name email phone role")
         .sort({ createdAt: -1 })
+        .populate('deletedBy', 'name email phone role')
+        .populate('updatedBy', 'name email phone role')
+        .populate('createdBy', 'name email phone role')
         .lean();
 
       // Add presigned URLs to images and videos for each property

@@ -501,6 +501,55 @@ const updateProperty = async (req, res) => {
     const uploadedImages = req.files?.images || [];
     const uploadedVideos = req.files?.videos || [];
 
+    // ✅ MEDIA LIMIT VALIDATION
+    const existingImagesCount = property.images?.length || 0;
+    const existingVideosCount = property.videos?.length || 0;
+
+    const uploadedImagesCount = req.files?.images?.length || 0;
+    const uploadedVideosCount = req.files?.videos?.length || 0;
+
+    const effectiveExistingImages = existingImagesCount - removedImages.length;
+    const effectiveExistingVideos = existingVideosCount - removedVideos.length;
+
+    const totalImagesAfterUpload =
+      effectiveExistingImages + uploadedImagesCount;
+    const totalVideosAfterUpload =
+      effectiveExistingVideos + uploadedVideosCount;
+
+    // ✅ IMAGE LIMIT CHECK
+    if (totalImagesAfterUpload > 10) {
+      // Cleanup temp uploaded image files from multer if any
+      if (req.files?.images) {
+        req.files.images.forEach((file) => {
+          try {
+            safeDeleteSync(file.path);
+          } catch (err) {}
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        message: `Only ${10} images are allowed in total. You can upload ${
+          10 - effectiveExistingImages
+        } more image(s).`,
+      });
+    }
+
+    // ✅ VIDEO LIMIT CHECK (Max 1 total)
+    if (totalVideosAfterUpload > 1) {
+      // Cleanup temp uploaded video files from multer if any
+      if (req.files?.videos) {
+        req.files.videos.forEach((file) => {
+          try {
+            safeDeleteSync(file.path);
+          } catch (err) {}
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        message: `Only 1 video is allowed. Remove the existing video first before uploading a new one.`,
+      });
+    }
+
     // 1A) Handle REPLACEMENTS: for each oldKey -> newFileName, find file in uploaded arrays and upload it
     // We will not delete oldKey yet. We will upload new file to newKey and record oldKey for deletion after commits.
     for (const [oldKey, newFileName] of Object.entries(replaceMap || {})) {
@@ -787,6 +836,20 @@ const uploadPropertyImages = async (req, res) => {
     const r2UploadedKeys = [];
     const localTempFiles = [];
 
+    if (req.files?.length > 10) {
+      // Cleanup temp local files
+      req.files.forEach((file) => {
+        try {
+          safeDeleteSync(file.path);
+        } catch {}
+      });
+
+      return res.status(400).json({
+        success: false,
+        message: "You can upload a maximum of 10 images per request.",
+      });
+    }
+
     try {
       for (const file of files) {
         const imageKey = `properties/${property._id}/images/${Date.now()}-${
@@ -853,6 +916,21 @@ const uploadPropertyVideos = async (req, res) => {
         .json({ success: false, message: "Property not found" });
 
     const videos = req.files?.videos || [];
+
+    if (videos.length > 1) {
+      // Cleanup temp
+      videos.forEach((file) => {
+        try {
+          safeDeleteSync(file.path);
+        } catch {}
+      });
+
+      return res.status(400).json({
+        success: false,
+        message: "You can upload only 1 video per request.",
+      });
+    }
+
     if (videos.length === 0)
       return res
         .status(400)
@@ -928,11 +1006,7 @@ const uploadPropertyVideos = async (req, res) => {
  */
 const deleteProperty = async (req, res) => {
   try {
-    const property = await Property.findByIdAndUpdate(
-      req.params.id,
-      { isDeleted: true },
-      { new: true, runValidators: true } // returns the updated doc
-    );
+    const property = await Property.findById(req.params.id);
 
     if (!property) {
       return res.status(404).json({
@@ -941,8 +1015,12 @@ const deleteProperty = async (req, res) => {
       });
     }
 
-    // Soft delete (ensured above)
+    // ✅ Soft Delete & Track Who Deleted
     property.isDeleted = true;
+    property.deletedBy = req.user?._id || null; // Stores the admin who deleted
+    property.deletedAt = new Date(); // Save timestamp for audit
+    property.updatedBy = req.user?._id || property.updatedBy; // Optional: keep consistent audit trail
+
     await property.save();
 
     res.status(200).json({
