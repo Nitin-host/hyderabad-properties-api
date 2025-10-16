@@ -15,7 +15,7 @@ async function convertToMp4(filePath, originalName, options = {}) {
   const outputFilePath = path.join(outputDir, `${Date.now()}-${cleanName}.mp4`);
 
   try {
-    await runFfmpeg(['-y','-v','error','-i',filePath,'-map','0:v','-map','0:a?','-c:v','copy','-c:a','aac','-b:a','128k','-movflags','+faststart'], { timeoutMs: 3*60*1000 });
+    await runFfmpeg(['-y','-v','error','-i',filePath,'-map','0:v','-map','0:a?','-c:v','copy','-c:a','aac','-b:a','128k','-movflags','+faststart', outputFilePath], { timeoutMs: 3*60*1000 });
     if (deleteOriginal) safeDeleteSync(filePath);
     return { outputPath: outputFilePath, finalName: `${cleanName}.mp4` };
   } catch {}
