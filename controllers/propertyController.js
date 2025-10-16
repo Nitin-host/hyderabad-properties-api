@@ -112,12 +112,12 @@ async function processVideoUpload({
   let finalName = file.originalname;
 
   // convert to mp4 if needed
- if (file.mimetype !== 'video/mp4') {
-    const { outputPath, finalName: convertedName } = await convertToMp4(file.path, file.originalname, { deleteOriginal:false });
-    localTempFiles.push(outputPath);
-    videoPath = outputPath;
-    finalName = convertedName;
-  }
+ // if (file.mimetype !== 'video/mp4') {
+ //    const { outputPath, finalName: convertedName } = await convertToMp4(file.path, file.originalname, { deleteOriginal:false });
+ //    localTempFiles.push(outputPath);
+ //    videoPath = outputPath;
+ //    finalName = convertedName;
+ //  }
 
   const thumbPath = await generateVideoThumbnail(videoPath);
    localTempFiles.push(thumbPath);
