@@ -221,7 +221,23 @@ const getProperties = async (req, res) => {
 
     if (req.query.search) {
       const searchRegex = new RegExp(req.query.search, "i");
-      filter.$or = [{ title: searchRegex }, { description: searchRegex }];
+
+      // Find users matching search in name (createdBy or updatedBy)
+      const matchedUsers = await User.find({
+        name: searchRegex,
+      })
+        .select("_id")
+        .lean();
+
+      const matchedUserIds = matchedUsers.map((user) => user._id);
+
+      filter.$or = [
+        { title: searchRegex },
+        { description: searchRegex },
+        { bedrooms: searchRegex },
+        { createdBy: { $in: matchedUserIds } }, // match createdBy user IDs
+        { updatedBy: { $in: matchedUserIds } }, // match updatedBy user IDs
+      ];
     }
 
     // Total count for pagination
