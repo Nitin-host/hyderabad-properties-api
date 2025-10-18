@@ -34,15 +34,43 @@ router.get(
   async (req, res) => {
     try {
       const Property = require("../models/Property");
+      const User = require("../models/User");
       const { getPresignedUrl } = require("../services/r2Service");
+      const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+      const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
+
+      const filter = { isDeleted: true };
+      const total = await Property.countDocuments(filter);
+
+      if (req.query.search) {
+           const searchRegex = new RegExp(req.query.search, "i");
+     
+           // Find users matching search in name (createdBy or updatedBy)
+           const matchedUsers = await User.find({
+             name: searchRegex,
+           })
+             .select("_id")
+             .lean();
+     
+           const matchedUserIds = matchedUsers.map((user) => user._id);
+     
+           filter.$or = [
+             { title: searchRegex },
+             { description: searchRegex },
+             { bedrooms: searchRegex },
+             { deletedBy: { $in: matchedUserIds } }, // match createdBy user IDs
+           ];
+         }
 
       // Fetch deleted properties
-      const properties = await Property.find({ isDeleted: true })
+      const properties = await Property.find(filter)
+        .skip((page - 1) * limit)
+        .limit(limit)
         .populate("agent", "name email phone role")
         .sort({ createdAt: -1 })
-        .populate('deletedBy', 'name email phone role')
-        .populate('updatedBy', 'name email phone role')
-        .populate('createdBy', 'name email phone role')
+        .populate("deletedBy", "name email phone role")
+        .populate("updatedBy", "name email phone role")
+        .populate("createdBy", "name email phone role")
         .lean();
 
       // Add presigned URLs to images and videos for each property
@@ -77,6 +105,14 @@ router.get(
         success: true,
         count: propertiesWithPresignedUrls.length,
         data: propertiesWithPresignedUrls,
+        pagination: {
+          total,
+          page,
+          limit,
+          pages: Math.ceil(total / limit),
+          hasNextPage: page < Math.ceil(total / limit),
+          hasPrevPage: page > 1,
+        },
       });
     } catch (error) {
       console.error("Get deleted properties error:", error);
@@ -305,7 +341,7 @@ router.put(
       if (!property.isDeleted) {
         return res.status(200).json({
           success: true,
-          message: "Property was already active",
+          message: "Property was restored successfully",
           data: property,
         });
       }

@@ -389,8 +389,19 @@ exports.getAllUsers = async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
+    let filter = {};
+    if (req.query.search) {
+      const searchRegex = new RegExp(req.query.search, "i");
+      filter = {
+        $or: [
+          { name: { $regex: searchRegex } },
+          { email: { $regex: searchRegex } },
+          // add other fields to search if needed
+        ],
+      };
+    }
 
-    const users = await User.find()
+    const users = await User.find(filter)
       .select('-password')
       .skip(skip)
       .limit(limit)
