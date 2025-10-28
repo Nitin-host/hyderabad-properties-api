@@ -9,6 +9,9 @@ const {
   uploadPropertyImages,
   uploadPropertyVideos,
   upload,
+  getAdminProperties,
+  getDeletedProperties,
+  permanentDelete,
 } = require('../controllers/propertyController');
 const {
   validateCreateProperty,
@@ -16,8 +19,7 @@ const {
   validatePropertyId,
   parseJsonFieldsMiddleware,
 } = require('../middleware/propertyValidation');
-const { protect, authorize } = require('../middleware/auth');
-
+const { protect, authorize, adminOrSuperAdmin } = require('../middleware/auth');
 
 // Public routes
 /**
@@ -27,103 +29,9 @@ const { protect, authorize } = require('../middleware/auth');
  */
 router.get('/', getProperties);
 
-router.get(
-  "/deleted",
-  protect,
-  authorize("admin", "super_admin"),
-  async (req, res) => {
-    try {
-      const Property = require("../models/Property");
-      const User = require("../models/User");
-      const { getPresignedUrl } = require("../services/r2Service");
-      const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-      const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
+router.get( "/deleted", protect, adminOrSuperAdmin, getDeletedProperties);
 
-      const filter = { isDeleted: true };
-      const total = await Property.countDocuments(filter);
-
-      if (req.query.search) {
-           const searchRegex = new RegExp(req.query.search, "i");
-     
-           // Find users matching search in name (createdBy or updatedBy)
-           const matchedUsers = await User.find({
-             name: searchRegex,
-           })
-             .select("_id")
-             .lean();
-     
-           const matchedUserIds = matchedUsers.map((user) => user._id);
-     
-           filter.$or = [
-             { title: searchRegex },
-             { description: searchRegex },
-             { bedrooms: searchRegex },
-             { deletedBy: { $in: matchedUserIds } }, // match createdBy user IDs
-           ];
-         }
-
-      // Fetch deleted properties
-      const properties = await Property.find(filter)
-        .skip((page - 1) * limit)
-        .limit(limit)
-        .populate("agent", "name email phone role")
-        .sort({ createdAt: -1 })
-        .populate("deletedBy", "name email phone role")
-        .populate("updatedBy", "name email phone role")
-        .populate("createdBy", "name email phone role")
-        .lean();
-
-      // Add presigned URLs to images and videos for each property
-      const propertiesWithPresignedUrls = await Promise.all(
-        properties.map(async (property) => {
-          const images = await Promise.all(
-            (property.images || []).map(async (img) => ({
-              ...img,
-              presignUrl: img.key ? await getPresignedUrl(img.key) : null,
-            }))
-          );
-
-          const videos = await Promise.all(
-            (property.videos || []).map(async (vid) => ({
-              ...vid,
-              presignUrl: vid.key ? await getPresignedUrl(vid.key) : null,
-              thumbnail: vid.thumbnailKey
-                ? await getPresignedUrl(vid.thumbnailKey)
-                : null,
-            }))
-          );
-
-          return {
-            ...property,
-            images,
-            videos,
-          };
-        })
-      );
-
-      res.status(200).json({
-        success: true,
-        count: propertiesWithPresignedUrls.length,
-        data: propertiesWithPresignedUrls,
-        pagination: {
-          total,
-          page,
-          limit,
-          pages: Math.ceil(total / limit),
-          hasNextPage: page < Math.ceil(total / limit),
-          hasPrevPage: page > 1,
-        },
-      });
-    } catch (error) {
-      console.error("Get deleted properties error:", error);
-      res.status(500).json({
-        success: false,
-        message: "Failed to fetch deleted properties",
-        error: error.message,
-      });
-    }
-  }
-);
+router.get("/admin", protect, adminOrSuperAdmin, getAdminProperties);
 
 /**
  * @desc    Get single property by ID
@@ -180,134 +88,10 @@ router.delete('/:id', protect, authorize('admin', 'super_admin'), validateProper
 
 // Admin-only routes
 /**
- * @desc    Get all properties including deleted ones (admin view)
- * @route   GET /api/properties/admin/all
- * @access  Private (admin, super_admin only)
- */
-router.get(
-  '/admin/all',
-  protect,
-  authorize('admin', 'super_admin'),
-  async (req, res) => {
-    try {
-      const Property = require('../models/Property');
-      
-      const page = parseInt(req.query.page) || 1;
-      const limit = parseInt(req.query.limit) || 10;
-      const skip = (page - 1) * limit;
-
-      // Build filter object (include deleted properties for admin)
-      const filter = {};
-      
-      if (req.query.isDeleted !== undefined) {
-        filter.isDeleted = req.query.isDeleted === 'true';
-      }
-
-      if (req.query.status) {
-        filter.status = req.query.status;
-      }
-
-      if (req.query.propertyType) {
-        filter.propertyType = req.query.propertyType;
-      }
-
-      const properties = await Property.find(filter)
-        .populate('agent', 'name email phone role')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean();
-
-      const total = await Property.countDocuments(filter);
-      const totalPages = Math.ceil(total / limit);
-
-      res.status(200).json({
-        success: true,
-        count: properties.length,
-        total,
-        totalPages,
-        currentPage: page,
-        data: properties
-      });
-    } catch (error) {
-      console.error('Admin get all properties error:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Failed to fetch properties',
-        error: error.message
-      });
-    }
-  }
-);
-
-/**
  * @desc    Permanently delete property (hard delete)
  * @route   DELETE /api/properties/admin/:id/permanent
- * @access  Private (super_admin only)
  */
-router.delete(
-  "/admin/:id/permanent",
-  protect,
-  authorize("super_admin"),
-  validatePropertyId,
-  async (req, res) => {
-    try {
-      const Property = require("../models/Property");
-      const r2Service = require("../services/r2Service"); // your R2 service
-
-      const property = await Property.findById(req.params.id);
-
-      if (!property) {
-        return res.status(404).json({
-          success: false,
-          message: "Property not found",
-        });
-      }
-
-      // Delete images from R2
-      if (property.images && property.images.length > 0) {
-        for (const image of property.images) {
-          if (image.key) {
-            try {
-              await r2Service.deleteFile(image.key);
-            } catch (error) {
-              console.error(`Failed to delete image ${image.key}:`, error);
-            }
-          }
-        }
-      }
-
-      // Delete videos from R2
-      if (property.videos && property.videos.length > 0) {
-        for (const video of property.videos) {
-          if (video.key && video.thumbnailKey) {
-            try {
-              await r2Service.deleteFile(video.key);
-              await r2Service.deleteFile(video.thumbnailKey);
-            } catch (error) {
-              console.error(`Failed to delete video ${video.key}:`, error);
-            }
-          }
-        }
-      }
-
-      // Permanently delete from database
-      await Property.findByIdAndDelete(req.params.id);
-
-      res.status(200).json({
-        success: true,
-        message: "Property permanently deleted successfully",
-      });
-    } catch (error) {
-      console.error("Permanent delete property error:", error);
-      res.status(500).json({
-        success: false,
-        message: "Failed to permanently delete property",
-        error: error.message,
-      });
-    }
-  }
-);
+router.delete("/admin/:id/permanent", protect, adminOrSuperAdmin, validatePropertyId, permanentDelete);
 
 /**
  * @desc    Restore soft-deleted property

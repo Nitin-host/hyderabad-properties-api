@@ -1017,6 +1017,190 @@ const uploadPropertyVideos = async (req, res) => {
 };
 
 /**
+ * get the properties data whom created admin for super_admin can view all 
+ */
+const getAdminProperties = async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
+    const skip = (page - 1) * limit;
+
+    const filter = { isDeleted: { $ne: true } };
+
+    // Show only own properties if role is admin
+    if (req.user.role === "admin") {
+      filter.createdBy = req.user._id;
+    }
+
+    // Apply other filters/search as needed...
+
+    const total = await Property.countDocuments(filter);
+    const properties = await Property.find(filter)
+      .skip(skip)
+      .limit(limit)
+      .sort({ createdAt: -1 })
+      .populate("createdBy", "name email phone")
+      .populate("updatedBy", "name email phone")
+      .lean();
+
+    // Map media presigned URLs (reuse your existing functions as needed)
+    const propertiesWithUrls = await Promise.all(
+      properties.map(async (prop) => {
+        const images = await Promise.all(
+          (prop.images || [])
+            .filter((img) => img.key)
+            .map(async (img) => ({
+              ...img,
+              presignUrl: await getPresignedUrl(img.key),
+            }))
+        );
+
+        const videos = await Promise.all(
+          (prop.videos || [])
+            .filter((vid) => vid.key)
+            .map(async (vid) => ({
+              ...vid,
+              presignUrl: await getPresignedUrl(vid.key),
+              thumbnail: vid.thumbnailKey
+                ? await getPresignedUrl(vid.thumbnailKey)
+                : null,
+            }))
+        );
+
+        return {
+          ...prop,
+          images,
+          videos,
+        };
+      })
+    );
+    res.status(200).json({
+      success: true,
+      count: properties.length,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit),
+        hasNextPage: page < Math.ceil(total / limit),
+        hasPrevPage: page > 1,
+      },
+      data: propertiesWithUrls,
+    });
+  } catch (error) {
+    console.error("Get admin properties error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch properties",
+      error: error.message,
+    });
+  }
+};
+
+
+/**
+ * Get the Properties data of deleted properties by admin, for super_admin can view all
+ */
+
+const getDeletedProperties = async (req, res) => {
+    try {
+      const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+      const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
+
+      const filter = { isDeleted: true };
+      if (req.user.role !== "super_admin") {
+        filter.$or = [{ createdBy: req.user._id }, { deletedBy: req.user._id }];
+      }
+      const total = await Property.countDocuments(filter);
+
+      if (req.query.search) {
+        const searchRegex = new RegExp(req.query.search, "i");
+
+        // Find users matching search
+        const matchedUsers = await User.find({
+          name: searchRegex,
+        })
+          .select("_id")
+          .lean();
+
+        const matchedUserIds = matchedUsers.map((u) => u._id);
+
+        filter.$and = [
+          filter.$or ? filter : {}, // keep ownership filter
+          {
+            $or: [
+              { title: searchRegex },
+              { description: searchRegex },
+              { bedrooms: searchRegex },
+              { deletedBy: { $in: matchedUserIds } },
+            ],
+          },
+        ];
+      }
+
+      // Fetch deleted properties
+      const properties = await Property.find(filter)
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .populate("agent", "name email phone role")
+        .sort({ createdAt: -1 })
+        .populate("deletedBy", "name email phone role")
+        .populate("updatedBy", "name email phone role")
+        .populate("createdBy", "name email phone role")
+        .lean();
+
+      // Add presigned URLs to images and videos for each property
+      const propertiesWithPresignedUrls = await Promise.all(
+        properties.map(async (property) => {
+          const images = await Promise.all(
+            (property.images || []).map(async (img) => ({
+              ...img,
+              presignUrl: img.key ? await getPresignedUrl(img.key) : null,
+            }))
+          );
+
+          const videos = await Promise.all(
+            (property.videos || []).map(async (vid) => ({
+              ...vid,
+              presignUrl: vid.key ? await getPresignedUrl(vid.key) : null,
+              thumbnail: vid.thumbnailKey
+                ? await getPresignedUrl(vid.thumbnailKey)
+                : null,
+            }))
+          );
+
+          return {
+            ...property,
+            images,
+            videos,
+          };
+        })
+      );
+
+      res.status(200).json({
+        success: true,
+        count: propertiesWithPresignedUrls.length,
+        data: propertiesWithPresignedUrls,
+        pagination: {
+          total,
+          page,
+          limit,
+          pages: Math.ceil(total / limit),
+          hasNextPage: page < Math.ceil(total / limit),
+          hasPrevPage: page > 1,
+        },
+      });
+    } catch (error) {
+      console.error("Get deleted properties error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch deleted properties",
+        error: error.message,
+      });
+    }
+}
+
+/**
  * @desc    Delete property (soft delete)
  * @route   DELETE /api/properties/:id
  * @access  Private
@@ -1054,6 +1238,65 @@ const deleteProperty = async (req, res) => {
   }
 };
 
+/**
+  * @desc    Permanently delete property (hard delete)
+ * @route   DELETE /api/properties/admin/:id/permanent
+ */
+const permanentDelete = async (req, res) => {
+    try {
+      const property = await Property.findById(req.params.id);
+
+      if (!property) {
+        return res.status(404).json({
+          success: false,
+          message: "Property not found",
+        });
+      }
+
+      // Delete images from R2
+      if (property.images && property.images.length > 0) {
+        for (const image of property.images) {
+          if (image.key) {
+            try {
+              await r2Service.deleteFile(image.key);
+            } catch (error) {
+              console.error(`Failed to delete image ${image.key}:`, error);
+            }
+          }
+        }
+      }
+
+      // Delete videos from R2
+      if (property.videos && property.videos.length > 0) {
+        for (const video of property.videos) {
+          if (video.key && video.thumbnailKey) {
+            try {
+              await r2Service.deleteFile(video.key);
+              await r2Service.deleteFile(video.thumbnailKey);
+            } catch (error) {
+              console.error(`Failed to delete video ${video.key}:`, error);
+            }
+          }
+        }
+      }
+
+      // Permanently delete from database
+      await Property.findByIdAndDelete(req.params.id);
+
+      res.status(200).json({
+        success: true,
+        message: "Property permanently deleted successfully",
+      });
+    } catch (error) {
+      console.error("Permanent delete property error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to permanently delete property",
+        error: error.message,
+      });
+    }
+}
+
 module.exports = {
   getProperties,
   getProperty,
@@ -1062,5 +1305,8 @@ module.exports = {
   deleteProperty,
   uploadPropertyImages,
   uploadPropertyVideos,
+  getAdminProperties,
+  getDeletedProperties,
+  permanentDelete,
   upload,
 };

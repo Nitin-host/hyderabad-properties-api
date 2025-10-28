@@ -6,7 +6,7 @@ const path2 = require('path');
 
 async function generateVideoThumbnail(videoPath, options={}) {
   const outputDir = options.outputDir || process.env.THUMBNAIL_DIR || 'uploads/video-thumbnails';
-  const timestamp = options.timestamp || '00:00:03';
+  const timestamp = options.timestamp || '00:00:01';
   const deleteOriginal = options.deleteOriginal === true;
   await ensureDir2(outputDir);
 
