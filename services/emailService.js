@@ -1,30 +1,63 @@
 require('dotenv').config();
-const SibApiV3Sdk = require('@sendinblue/client');
+// const SibApiV3Sdk = require('@sendinblue/client');
 
-const tranEmailApi = new SibApiV3Sdk.TransactionalEmailsApi();
-tranEmailApi.setApiKey(
-  SibApiV3Sdk.TransactionalEmailsApiApiKeys.apiKey,
-  process.env.BREVO_API_KEY
-);
+// const tranEmailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+// tranEmailApi.setApiKey(
+//   SibApiV3Sdk.TransactionalEmailsApiApiKeys.apiKey,
+//   process.env.BREVO_API_KEY
+// );
 
+// const sendEmail = async (to, subject, html) => {
+//   try {
+//     const response = await tranEmailApi.sendTransacEmail({
+//       sender: {
+//         email: process.env.EMAIL_FROM,
+//         name: process.env.EMAIL_FROM_NAME,
+//       },
+//       to: [{ email: to }],
+//       subject,
+//       htmlContent: html,
+//     });
+//     console.log(`Email sent successfully`);
+//     return response;
+//   } catch (error) {
+//     console.error(`Error sending email to ${to}:`, error);
+//     throw error;
+//   }
+// };
+const nodemailer = require("nodemailer");
+
+// Create a transporter using your SMTP configuration
+const transporter = nodemailer.createTransport({
+  host: process.env.EMAIL_HOST, // e.g., smtp.gmail.com or your SMTP server
+  port: process.env.EMAIL_PORT || 587,
+  secure: false, // true for 465 (SSL), false for other ports
+  auth: {
+    user: process.env.EMAIL_USER, // SMTP username
+    pass: process.env.EMAIL_PASS, // SMTP password or app-specific password
+  },
+  tls: {
+    rejectUnauthorized: false, // <== Add this line
+  },
+});
+
+// Generic sendEmail function
 const sendEmail = async (to, subject, html) => {
   try {
-    const response = await tranEmailApi.sendTransacEmail({
-      sender: {
-        email: process.env.EMAIL_FROM,
-        name: process.env.EMAIL_FROM_NAME,
-      },
-      to: [{ email: to }],
+    const info = await transporter.sendMail({
+      from: `"${process.env.EMAIL_FROM_NAME}" <${process.env.EMAIL_FROM}>`,
+      to,
       subject,
-      htmlContent: html,
+      html,
     });
-    console.log(`Email sent successfully`);
-    return response;
+    console.log("Email sent Successfully");
+    return info;
   } catch (error) {
     console.error(`Error sending email to ${to}:`, error);
     throw error;
   }
 };
+
 
 // Send confirmation email for user registration
 exports.sendConfirmationEmail = async (email, name) => {
