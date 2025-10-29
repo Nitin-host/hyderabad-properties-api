@@ -1258,8 +1258,13 @@ const permanentDelete = async (req, res) => {
         for (const image of property.images) {
           if (image.key) {
             try {
-              await r2Service.deleteFile(image.key);
+              await deleteFile(image.key);
             } catch (error) {
+               res.status(500).json({
+                 success: false,
+                 message: "Failed to delete property images",
+                 error: error.message,
+               });
               console.error(`Failed to delete image ${image.key}:`, error);
             }
           }
@@ -1271,9 +1276,14 @@ const permanentDelete = async (req, res) => {
         for (const video of property.videos) {
           if (video.key && video.thumbnailKey) {
             try {
-              await r2Service.deleteFile(video.key);
-              await r2Service.deleteFile(video.thumbnailKey);
+              await deleteFile(video.key);
+              await deleteFile(video.thumbnailKey);
             } catch (error) {
+               res.status(500).json({
+                 success: false,
+                 message: "Failed to delete property videos",
+                 error: error.message,
+               });
               console.error(`Failed to delete video ${video.key}:`, error);
             }
           }
