@@ -863,7 +863,7 @@ const uploadPropertyImages = async (req, res) => {
 
       return res.status(400).json({
         success: false,
-        message: "You can upload a maximum of 10 images per request.",
+        message: "You can upload a maximum of 20 images per request.",
       });
     }
 

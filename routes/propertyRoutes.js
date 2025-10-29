@@ -49,7 +49,7 @@ router.get('/:id', validatePropertyId, getProperty);
 router.post('/', protect, authorize('admin', 'super_admin'), parseJsonFieldsMiddleware(["amenities"]), validateCreateProperty, createProperty);
 
 // Image Upload route
-router.post('/:id/images', protect, authorize('admin', 'super_admin'), validatePropertyId, upload.array('images', 10), uploadPropertyImages);
+router.post('/:id/images', protect, authorize('admin', 'super_admin'), validatePropertyId, upload.array('images', 20), uploadPropertyImages);
 
 // Video Upload route
 router.post('/:id/video', protect, authorize('admin', 'super_admin'), validatePropertyId, upload.fields([{ name: 'videos', maxCount: 1 }]), uploadPropertyVideos);
@@ -64,7 +64,7 @@ router.put(
   protect,
   authorize("admin", "super_admin"),
   upload.fields([
-    { name: "images", maxCount: 10 },
+    { name: "images", maxCount: 20 },
     { name: "videos", maxCount: 1 },
     { name: "replaceMapFiles", maxCount: 10 }
   ]),
