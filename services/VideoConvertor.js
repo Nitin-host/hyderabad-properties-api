@@ -5,7 +5,10 @@
 
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const { runFfmpeg, ensureDir, safeDeleteSync } = require("./FfmpegHelper");
+
+const isRailway = !!process.env.RAILWAY_ENVIRONMENT;
 
 // --- Clean up unsafe characters for filenames
 function safeFilename(name) {
@@ -14,29 +17,27 @@ function safeFilename(name) {
 
 // --- Main conversion function
 async function convertToMp4(filePath, originalName, options = {}) {
-  // Resolve output directory safely and ensure it exists
+  // ✅ Cross-platform writable output directory
   const outputDir = path.resolve(
     options.outputDir ||
       process.env.CONVERTED_VIDEOS_DIR ||
-      "uploads/converted-videos"
+      (isRailway
+        ? path.join("/tmp", "converted-videos")
+        : path.join(__dirname, "../uploads/converted-videos"))
   );
 
   await ensureDirSafe(outputDir);
 
   const deleteOriginal = options.deleteOriginal === true;
-
-  // Derive clean filename
   const baseName = path.basename(originalName, path.extname(originalName));
   const cleanName = safeFilename(baseName);
-
   const outputFilePath = path.join(outputDir, `${Date.now()}-${cleanName}.mp4`);
 
-  // Normalize for FFmpeg (especially important on Windows)
   const safeInput = filePath.replace(/\\/g, "/");
   const safeOutput = outputFilePath.replace(/\\/g, "/");
 
   try {
-    // Attempt fast remux first (no re-encode)
+    // Try fast remux first
     await runFfmpeg(
       [
         "-y",
@@ -67,7 +68,7 @@ async function convertToMp4(filePath, originalName, options = {}) {
     console.warn("⚠️ Fast copy failed, re-encoding instead:", err.message);
   }
 
-  // Fallback: re-encode with libx264
+  // Fallback: full re-encode
   await runFfmpeg(
     [
       "-y",

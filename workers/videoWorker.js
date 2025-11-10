@@ -1,15 +1,12 @@
 // -----------------------------------------------------
-// workers/videoWorker.js
-// Complete HLS transcoding worker with ffmpeg + ffprobe support
+// workers/videoWorker.js (cross-platform: local + Railpack)
 // -----------------------------------------------------
 
 const { parentPort, workerData } = require("worker_threads");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { execSync } = require("child_process");
-
-// ✅ Use npm-installed ffmpeg & ffprobe binaries
-const ffprobePath = require("@ffprobe-installer/ffprobe").path;
 
 const {
   uploadStream,
@@ -24,7 +21,12 @@ const {
   runFfmpeg,
   ensureDir,
   safeDeleteSync,
+  FFPROBE_PATH,
 } = require("../services/FfmpegHelper");
+
+// --- Determine writable temp directory based on environment ---
+const isRailway = !!process.env.RAILWAY_ENVIRONMENT;
+const TEMP_BASE = isRailway ? "/tmp" : os.tmpdir();
 
 // --- Utility: sanitize filenames for R2 keys ---
 function sanitizeKey(key) {
@@ -53,9 +55,13 @@ function deleteFolderRecursive(folderPath) {
 // --- Main Worker Execution ---
 (async () => {
   const { tempPath: rawTempPath, originalName, propertyId } = workerData;
+
+  // ✅ Use OS-safe temp directory
   const tempPath = path.isAbsolute(rawTempPath)
     ? rawTempPath
-    : path.join(__dirname, "../", rawTempPath);
+    : path.join(TEMP_BASE, "tempUploads", rawTempPath);
+
+  const hlsOutputDir = path.join(TEMP_BASE, `hls-${propertyId}`);
 
   console.log(
     `🎥 Worker started for property: ${propertyId}, file: ${originalName}`
@@ -64,7 +70,6 @@ function deleteFolderRecursive(folderPath) {
 
   let finalVideoPath = tempPath;
   let thumbnailPath = null;
-  const hlsOutputDir = path.join(__dirname, `../uploads/hls-${propertyId}`);
   const uploadedKeys = [];
   let uploadCompleted = false;
 
@@ -91,10 +96,10 @@ function deleteFolderRecursive(folderPath) {
     }
 
     // 2️⃣ Determine dynamic HLS segment duration
-    let hlsSegmentDuration = 4; // default
+    let hlsSegmentDuration = 4;
     try {
       const durationStr = execSync(
-        `"${ffprobePath}" -v error -show_entries format=duration -of csv=p=0 "${finalVideoPath}"`,
+        `"${FFPROBE_PATH}" -v error -show_entries format=duration -of csv=p=0 "${finalVideoPath}"`,
         { encoding: "utf-8" }
       );
       const duration = parseFloat(durationStr.trim());
@@ -102,19 +107,16 @@ function deleteFolderRecursive(folderPath) {
       else if (duration > 300) hlsSegmentDuration = 10;
       else if (duration > 60) hlsSegmentDuration = 8;
       else hlsSegmentDuration = 4;
-
       console.log(
-        `⏱️ Video duration: ${duration.toFixed(
-          1
-        )}s — using ${hlsSegmentDuration}s HLS segments.`
+        `⏱️ Duration: ${duration.toFixed(1)}s — ${hlsSegmentDuration}s segments`
       );
     } catch (err) {
       console.warn("⚠️ Could not determine video duration:", err.message);
     }
 
-    // 3️⃣ Generate HLS segments (WITH AUDIO)
+    // 3️⃣ Generate HLS segments (multi-quality)
     await ensureDir(hlsOutputDir);
-    console.log("🎬 Generating multi-quality HLS with audio...");
+    console.log("🎬 Generating HLS...");
 
     const args = [
       "-i",
@@ -124,8 +126,6 @@ function deleteFolderRecursive(folderPath) {
         "[v1]scale=-2:480[v1out];" +
         "[v2]scale=-2:720[v2out];" +
         "[v3]scale=-2:1080[v3out]",
-
-      // 480p
       "-map",
       "[v1out]",
       "-map",
@@ -157,8 +157,6 @@ function deleteFolderRecursive(folderPath) {
       "-hls_segment_filename",
       path.join(hlsOutputDir, "480p_%03d.ts"),
       path.join(hlsOutputDir, "480p.m3u8"),
-
-      // 720p
       "-map",
       "[v2out]",
       "-map",
@@ -190,8 +188,6 @@ function deleteFolderRecursive(folderPath) {
       "-hls_segment_filename",
       path.join(hlsOutputDir, "720p_%03d.ts"),
       path.join(hlsOutputDir, "720p.m3u8"),
-
-      // 1080p
       "-map",
       "[v3out]",
       "-map",
@@ -226,7 +222,7 @@ function deleteFolderRecursive(folderPath) {
     ];
 
     await runFfmpeg(args, { cwd: hlsOutputDir, timeoutMs: 15 * 60 * 1000 });
-    console.log("✅ HLS generation completed (with audio).");
+    console.log("✅ HLS generation complete.");
 
     // 4️⃣ Create master playlist
     const masterPlaylist = `#EXTM3U
@@ -237,31 +233,21 @@ function deleteFolderRecursive(folderPath) {
 #EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1920x1080
 1080p.m3u8
 `;
-    const masterPath = path.join(hlsOutputDir, "master.m3u8");
-    fs.writeFileSync(masterPath, masterPlaylist);
+    fs.writeFileSync(path.join(hlsOutputDir, "master.m3u8"), masterPlaylist);
 
-    // 5️⃣ Generate thumbnail
+    // 5️⃣ Thumbnail + upload
     console.log("🖼️ Generating thumbnail...");
     thumbnailPath = await generateVideoThumbnail(finalVideoPath);
     console.log("✅ Thumbnail created:", thumbnailPath);
 
-    // 6️⃣ Upload to R2
-    console.log("☁️ Uploading HLS and thumbnail to R2...");
+    console.log("☁️ Uploading to R2...");
     const files = fs.readdirSync(hlsOutputDir);
-
     for (const file of files) {
       const filePath = path.join(hlsOutputDir, file);
-
-      // ✅ Ensure file exists before uploading
-      if (!fs.existsSync(filePath)) {
-        console.warn(`⚠️ Skip upload — file not found: ${filePath}`);
-        continue;
-      }
-
+      if (!fs.existsSync(filePath)) continue;
       const mimeType = file.endsWith(".m3u8")
         ? "application/x-mpegURL"
         : "video/MP2T";
-
       const key = sanitizeKey(`properties/${propertyId}/videos/${file}`);
       await uploadStream(fs.createReadStream(filePath), key, mimeType);
       uploadedKeys.push(key);
@@ -273,46 +259,32 @@ function deleteFolderRecursive(folderPath) {
           thumbnailPath
         )}`
       );
-      const thumbBuffer = fs.readFileSync(thumbnailPath);
-      await uploadBuffer(thumbBuffer, thumbKey, "image/jpeg");
+      await uploadBuffer(
+        fs.readFileSync(thumbnailPath),
+        thumbKey,
+        "image/jpeg"
+      );
       uploadedKeys.push(thumbKey);
-    } else {
-      console.warn("⚠️ Thumbnail file missing, skipping upload.");
     }
 
     uploadCompleted = true;
-    console.log("✅ Upload complete. Proceeding to cleanup...");
-
-    // 🕒 Add slight delay before cleanup to ensure upload streams close
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    console.log("✅ Upload complete.");
+    await new Promise((r) => setTimeout(r, 800));
   } catch (err) {
     console.error("❌ Worker failed:", err.message);
-
-    // Rollback uploaded files
     for (const key of uploadedKeys) {
       try {
         await deleteFile(key);
-      } catch (e) {
-        console.warn(`⚠️ Failed to delete ${key}:`, e.message);
-      }
+      } catch {}
     }
-
     parentPort.postMessage({ success: false, error: err.message });
   } finally {
-    try {
-      console.log(
-        uploadCompleted
-          ? "🧹 Upload successful — deleting local temp files..."
-          : "🧹 Upload failed — cleaning up partial files..."
-      );
-      deleteFolderRecursive(hlsOutputDir);
-      safeDeleteSync(thumbnailPath);
-      safeDeleteSync(tempPath);
-      if (finalVideoPath !== tempPath) safeDeleteSync(finalVideoPath);
-      console.log("✅ Local cleanup complete.");
-    } catch (cleanupErr) {
-      console.warn("⚠️ Cleanup warning:", cleanupErr.message);
-    }
+    console.log("🧹 Cleaning up temp files...");
+    deleteFolderRecursive(hlsOutputDir);
+    safeDeleteSync(thumbnailPath);
+    safeDeleteSync(tempPath);
+    if (finalVideoPath !== tempPath) safeDeleteSync(finalVideoPath);
+    console.log("✅ Cleanup complete.");
 
     if (uploadCompleted) {
       parentPort.postMessage({

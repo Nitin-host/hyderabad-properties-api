@@ -16,10 +16,21 @@ const { convertToMp4 } = require("../services/VideoConvertor");
 const { Worker } = require("worker_threads");
 const { enqueueVideoUpload } = require("../queue/videoQueue");
 
-// --- Temp folder setup ---
-// const uploadTempFolder = path.join(__dirname, "../tempUploads");
-const uploadTempFolder = process.env.TEMP_UPLOAD_PATH || path.join(__dirname, "../tempUploads");
-if (!fs.existsSync(uploadTempFolder)) fs.mkdirSync(uploadTempFolder);
+// Detect environment
+const isRailway = !!process.env.RAILWAY_ENVIRONMENT;
+
+// ✅ Use /tmp on Railway, local folder elsewhere
+const uploadTempFolder = process.env.TEMP_UPLOAD_PATH
+  ? process.env.TEMP_UPLOAD_PATH
+  : isRailway
+  ? path.join("/tmp", "tempUploads")
+  : path.join(__dirname, "../tempUploads");
+
+// Ensure folder exists
+if (!fs.existsSync(uploadTempFolder)) {
+  fs.mkdirSync(uploadTempFolder, { recursive: true });
+  console.log("📁 Created upload temp folder:", uploadTempFolder);
+}
 
 // --- Multer disk storage ---
 const storage = multer.diskStorage({
@@ -34,7 +45,8 @@ const upload = multer({
       cb(null, true);
     else if (file.fieldname === "videos" && file.mimetype.startsWith("video/"))
       cb(null, true);
-    else if (file.fieldname === "replaceMapFiles") cb(null, true);
+    else if (file.fieldname === "replaceMapFiles")
+      cb(null, true);
     else cb(new Error("Invalid file type"), false);
   },
 });
