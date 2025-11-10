@@ -12,6 +12,7 @@ const {
   getAdminProperties,
   getDeletedProperties,
   permanentDelete,
+  checkVideoStatus,
 } = require('../controllers/propertyController');
 const {
   validateCreateProperty,
@@ -54,6 +55,8 @@ router.post('/:id/images', protect, authorize('admin', 'super_admin'), validateP
 // Video Upload route
 router.post('/:id/video', protect, authorize('admin', 'super_admin'), validatePropertyId, upload.fields([{ name: 'videos', maxCount: 1 }]), uploadPropertyVideos);
 
+//video status route
+router.get('/:id/video/status', protect, authorize('admin', 'super_admin'), validatePropertyId, checkVideoStatus);
 /**
  * @desc    Update property
  * @route   PUT /api/properties/:id
