@@ -7,16 +7,30 @@ const {
   uploadStream,
   getPresignedUrl,
   deleteFile,
+  deleteVideoSet,
 } = require("../services/r2Service");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const { convertToMp4 } = require("../services/VideoConvertor");
+const { Worker } = require("worker_threads");
+const { enqueueVideoUpload } = require("../queue/videoQueue");
 
-// --- Temp folder setup ---
-// const uploadTempFolder = path.join(__dirname, "../tempUploads");
-const uploadTempFolder = process.env.TEMP_UPLOAD_PATH || path.join(__dirname, "../tempUploads");
-if (!fs.existsSync(uploadTempFolder)) fs.mkdirSync(uploadTempFolder);
+// Detect environment
+const isRailway = !!process.env.RAILWAY_ENVIRONMENT;
+
+// ✅ Use /tmp on Railway, local folder elsewhere
+const uploadTempFolder = process.env.TEMP_UPLOAD_PATH
+  ? process.env.TEMP_UPLOAD_PATH
+  : isRailway
+  ? path.join("/tmp", "tempUploads")
+  : path.join(__dirname, "../tempUploads");
+
+// Ensure folder exists
+if (!fs.existsSync(uploadTempFolder)) {
+  fs.mkdirSync(uploadTempFolder, { recursive: true });
+  console.log("📁 Created upload temp folder:", uploadTempFolder);
+}
 
 // --- Multer disk storage ---
 const storage = multer.diskStorage({
@@ -31,7 +45,8 @@ const upload = multer({
       cb(null, true);
     else if (file.fieldname === "videos" && file.mimetype.startsWith("video/"))
       cb(null, true);
-    else if (file.fieldname === "replaceMapFiles") cb(null, true);
+    else if (file.fieldname === "replaceMapFiles")
+      cb(null, true);
     else cb(new Error("Invalid file type"), false);
   },
 });
@@ -332,30 +347,58 @@ const getProperty = async (req, res) => {
       });
     }
 
-    // Try to fetch super_admin
+    // Fetch super admin (for global contact)
     const superAdmin = await User.findOne({ role: "super_admin" });
 
+    // 🖼️ Generate presigned + proxy URLs for all images
     const images = await Promise.all(
-      (property.images || [])
-        .filter((img) => img.key)
-        .map(async (img) => ({
+      (property.images || []).map(async (img) => {
+        const presigned = img.key ? await getPresignedUrl(img.key) : null;
+        const proxy = img.key ? `/api/r2proxy/${img.key}` : null;
+        return {
           ...img.toObject(),
-          presignUrl: img.key ? await getPresignedUrl(img.key) : null,
-        }))
+          presignUrl: presigned,
+          proxyUrl: proxy,
+        };
+      })
     );
 
+    // 🎥 Generate presigned + proxy URLs for videos
     const videos = await Promise.all(
-      (property.videos || [])
-        .filter((vid) => vid.key)
-        .map(async (vid) => ({
+      (property.videos || []).map(async (vid) => {
+        const result = {
           ...vid.toObject(),
-          presignUrl: vid.key ? await getPresignedUrl(vid.key) : null,
+          presignUrl: vid.masterKey
+            ? await getPresignedUrl(vid.masterKey)
+            : null,
+          masterProxyUrl: vid.masterKey
+            ? `/api/r2proxy/${vid.masterKey}`
+            : null,
           thumbnail: vid.thumbnailKey
             ? await getPresignedUrl(vid.thumbnailKey)
             : null,
-        }))
+          thumbnailProxyUrl: vid.thumbnailKey
+            ? `/api/r2proxy/${vid.thumbnailKey}`
+            : null,
+          qualityUrls: {},
+          qualityProxyUrls: {},
+        };
+
+        // Generate presigned + proxy URLs for each quality level
+        if (vid.qualityKeys) {
+          for (const [quality, key] of Object.entries(vid.qualityKeys)) {
+            if (key) {
+              result.qualityUrls[quality] = await getPresignedUrl(key);
+              result.qualityProxyUrls[quality] = `/api/r2proxy/${key}`;
+            }
+          }
+        }
+
+        return result;
+      })
     );
 
+    // ✅ Final response
     res.status(200).json({
       success: true,
       data: {
@@ -368,7 +411,7 @@ const getProperty = async (req, res) => {
               phone: superAdmin.phone,
               role: superAdmin.role,
             }
-          : {}, // send empty object if no super admin
+          : {},
         images,
         videos,
       },
@@ -452,13 +495,10 @@ const createProperty = async (req, res) => {
  * 5) Cleanup all local temp files. If any step fails before commit, rollback uploaded keys and cleanup local files, do not save.
  */
 const updateProperty = async (req, res) => {
-  // Tracking arrays for rollback / cleanup
-  const r2UploadedKeys = []; // R2 keys uploaded in this operation (for rollback)
-  const localTempFiles = []; // local temp file paths to delete at the end
-  const pendingImageUpdates = []; // image objects to add to property if commit
-  const pendingVideoUpdates = []; // video objects to add to property if commit
-  const keysToDeleteAfterCommit = []; // old R2 keys to delete (removed or replaced), deleted after new uploads succeed
-  const thumbnailsToDeleteAfterCommit = []; // thumbnail keys to delete after commit
+  const r2UploadedKeys = [];
+  const localTempFiles = [];
+  const pendingImageUpdates = [];
+  const keysToDeleteAfterCommit = [];
 
   try {
     const propertyId = req.params.id;
@@ -468,161 +508,82 @@ const updateProperty = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Property not found" });
 
-    // Fetch super_admin
+    // ✅ Always attach super admin
     const superAdmin = await User.findOne({ role: "super_admin" });
-    if (!superAdmin) {
-      return res.status(500).json({
-        success: false,
-        message: "Super admin user not found",
-      });
-    }
+    if (!superAdmin)
+      return res
+        .status(500)
+        .json({ success: false, message: "Super admin not found" });
 
-    // Remove empty string fields from req.body
     req.body = removeEmptyStrings(req.body);
-
-    // Always set agent to super_admin in memory; commit after success
-    property.agent = superAdmin._id;
-
-    // Set updatedBy
-    if (req.user && req.user._id) {
-      property.updatedBy = req.user._id;
-    }
-
-    // Parse JSON fields safely
-    const replaceMap = safeParseObject(req.body.replaceMap, "replaceMap"); // { oldKey: newFileName }
+    const replaceMap = safeParseObject(req.body.replaceMap, "replaceMap");
     const removedImages = safeParseArray(
       req.body.removedImages,
       "removedImages"
-    ); // array of keys
+    );
     const removedVideos = safeParseArray(
       req.body.removedVideos,
       "removedVideos"
-    ); // array of keys
+    );
 
-    // Keep copies of original arrays so we only modify on commit
-    const originalImages = Array.isArray(property.images)
-      ? [...property.images]
-      : [];
-    const originalVideos = Array.isArray(property.videos)
-      ? [...property.videos]
-      : [];
-
-    // --- 1) PREPARE: find uploaded files from multer (they are in req.files.images / req.files.videos)
     const uploadedImages = req.files?.images || [];
     const uploadedVideos = req.files?.videos || [];
 
-    // ✅ MEDIA LIMIT VALIDATION
-    const existingImagesCount = property.images?.length || 0;
-    const existingVideosCount = property.videos?.length || 0;
-
-    const uploadedImagesCount = req.files?.images?.length || 0;
-    const uploadedVideosCount = req.files?.videos?.length || 0;
-
-    const effectiveExistingImages = existingImagesCount - removedImages.length;
-    const effectiveExistingVideos = existingVideosCount - removedVideos.length;
-
-    const replaceCount = Object.keys(replaceMap || {}).length;
-
-    const totalImagesAfterUpload =
-      effectiveExistingImages + uploadedImagesCount - replaceCount;
-    const totalVideosAfterUpload =
-      effectiveExistingVideos + uploadedVideosCount - replaceCount;
-
-    // ✅ IMAGE LIMIT CHECK
-    if (totalImagesAfterUpload > 20) {
-      // Cleanup temp uploaded image files from multer if any
-      if (req.files?.images) {
-        req.files.images.forEach((file) => {
-          try {
-            safeDeleteSync(file.path);
-          } catch (err) {}
-        });
-      }
+    // ✅ Limit checks
+    if (
+      (property.images?.length || 0) -
+        removedImages.length +
+        uploadedImages.length >
+      20
+    ) {
+      uploadedImages.forEach((f) => safeDeleteSync(f.path));
       return res.status(400).json({
         success: false,
-        message: `Only ${10} images are allowed in total. You can upload ${
-          10 - effectiveExistingImages
-        } more image(s).`,
+        message: "Only 20 images are allowed.",
       });
     }
 
-    // ✅ VIDEO LIMIT CHECK (Max 1 total)
-    if (totalVideosAfterUpload > 1) {
-      // Cleanup temp uploaded video files from multer if any
-      if (req.files?.videos) {
-        req.files.videos.forEach((file) => {
-          try {
-            safeDeleteSync(file.path);
-          } catch (err) {}
-        });
-      }
+    // ✅ Count how many videos are being replaced
+    const replaceVideoCount = Object.entries(replaceMap || {}).filter(
+      ([oldKey, newFileName]) =>
+        uploadedVideos.some((f) => f.originalname === newFileName)
+    ).length;
+
+    // ✅ Adjusted video limit check
+    const effectiveVideos =
+      (property.videos?.masterKey || 0) -
+      removedVideos.length -
+      replaceVideoCount +
+      uploadedVideos.length;
+
+    if (effectiveVideos > 1) {
+      uploadedVideos.forEach((f) => safeDeleteSync(f.path));
       return res.status(400).json({
         success: false,
-        message: `Only 1 video is allowed. Remove the existing video first before uploading a new one.`,
+        message:
+          "Only one video allowed per property. Remove existing one first.",
       });
     }
 
-    // 1A) Handle REPLACEMENTS: for each oldKey -> newFileName, find file in uploaded arrays and upload it
-    // We will not delete oldKey yet. We will upload new file to newKey and record oldKey for deletion after commits.
+    // --- Handle image replacements ---
     for (const [oldKey, newFileName] of Object.entries(replaceMap || {})) {
-      // find file in uploaded images or videos
-      const uploadedFile =
-        uploadedImages.find(
-          (f) =>
-            f.originalname === newFileName && !localTempFiles.includes(f.path)
-        ) ||
-        uploadedVideos.find(
-          (f) =>
-            f.originalname === newFileName && !localTempFiles.includes(f.path)
-        );
+      const uploadedFile = uploadedImages.find(
+        (f) => f.originalname === newFileName
+      );
+      if (!uploadedFile) continue;
 
-      if (!uploadedFile) {
-        //remove the files we already uploaded
-        try{
-          safeDeleteSync(uploadedFile.path);
-        }catch(err){}
-        // If replacement mapping references a file that wasn't uploaded, that's an error.
-        throw new Error(
-          `Replacement file "${newFileName}" for "${oldKey}" not found in uploaded files.`
-        );
-        
-      }
-
-      // Decide image or video by mimetype
-      if (uploadedFile.mimetype.startsWith("image/")) {
-        // image replacement
-        const result = await processImageUpload({
-          file: uploadedFile,
-          propertyId,
-          r2UploadedKeys,
-          localTempFiles,
-        });
-        pendingImageUpdates.push(result); // { key }
-        // Record old key for deletion after commit (and remove the old from originalImages at commit time)
-        keysToDeleteAfterCommit.push(oldKey);
-      } else {
-        // video replacement: upload new video + thumbnail
-        const result = await processVideoUpload({
-          file: uploadedFile,
-          propertyId,
-          r2UploadedKeys,
-          localTempFiles,
-        });
-        pendingVideoUpdates.push(result); // { key, thumbnailKey }
-        // find the original video entry to get its thumbnailKey to delete after commit
-        const oldVideo = originalVideos.find((v) => v.key === oldKey);
-        if (oldVideo?.thumbnailKey)
-          thumbnailsToDeleteAfterCommit.push(oldVideo.thumbnailKey);
-        keysToDeleteAfterCommit.push(oldKey);
-      }
+      const result = await processImageUpload({
+        file: uploadedFile,
+        propertyId,
+        r2UploadedKeys,
+        localTempFiles,
+      });
+      pendingImageUpdates.push(result);
+      keysToDeleteAfterCommit.push(oldKey);
     }
 
-    // 1B) Handle NEW uploads (images & videos) - any files not used for replacements
-    // determine which uploaded files are used in replaceMap (we marked localTempFiles with file paths, but better to track used files)
-    const usedUploadedPaths = new Set(localTempFiles); // processImageUpload/processVideoUpload added file.path to localTempFiles
-    // For images:
+    // --- Handle new images ---
     for (const file of uploadedImages) {
-      if (usedUploadedPaths.has(file.path)) continue; // already processed as replacement
       const result = await processImageUpload({
         file,
         propertyId,
@@ -632,123 +593,86 @@ const updateProperty = async (req, res) => {
       pendingImageUpdates.push(result);
     }
 
-    // For videos:
-    for (const file of uploadedVideos) {
-      if (usedUploadedPaths.has(file.path)) continue; // already processed as replacement
-      const result = await processVideoUpload({
-        file,
-        propertyId,
-        r2UploadedKeys,
-        localTempFiles,
-      });
-      pendingVideoUpdates.push(result);
-    }
-
-    // If we've reached here, all new uploads succeeded. Now we can safely delete old keys requested to be removed or replaced.
-    // --- 2) Perform deletions of removedImages & removedVideos and old replacement keys (including thumbnails) ---
-    // Note: Deletions are attempted; if any deletion fails we log it but continue (because we already have new files uploaded and can still commit).
-    // If you want stricter behavior (abort on deletion failure), throw to rollback instead.
-
-    // Collect removals from user request
-    // removedImages: keys to remove from property.images
-    for (const key of removedImages) {
-      try {
-        await deleteFile(key);
-        // remove from originalImages
-        const idx = originalImages.findIndex((i) => i.key === key);
-        if (idx !== -1) originalImages.splice(idx, 1);
-      } catch (err) {
-        console.error(
-          `Failed to delete removed image key ${key} from R2:`,
-          err
-        );
-        // continue
-      }
-    }
-
-    // removedVideos: keys to remove from property.videos (delete thumbnail if exists)
-    for (const key of removedVideos) {
-      try {
-        const vid = originalVideos.find((v) => v.key === key);
-        if (vid?.thumbnailKey) {
-          try {
-            await deleteFile(vid.thumbnailKey);
-          } catch (err) {
-            console.error(
-              `Failed to delete thumbnail ${vid.thumbnailKey} for removed video ${key}:`,
-              err
-            );
-          }
+    // --- Handle image deletions ---
+    if (removedImages.length > 0) {
+      for (const key of removedImages) {
+        try {
+          await deleteFile(key);
+        } catch (err) {
+          console.error(`Failed to delete image ${key}:`, err.message);
         }
-        await deleteFile(key);
-        // remove from originalVideos
-        const idx = originalVideos.findIndex((v) => v.key === key);
-        if (idx !== -1) originalVideos.splice(idx, 1);
+      }
+      property.images = property.images.filter(
+        (img) => !removedImages.includes(img.key)
+      );
+    }
+
+    // --- Handle video deletions ---
+    if (removedVideos.length > 0) {
+      console.log(`🗑 Removing full video set for property ${propertyId}`);
+      try {
+        await deleteVideoSet(propertyId);
+        property.videos = [];
       } catch (err) {
-        console.error(
-          `Failed to delete removed video key ${key} from R2:`,
-          err
-        );
-        // continue
+        console.error("Failed to delete video set:", err);
       }
     }
 
-    // Old replacement keys (we recorded earlier) - delete them
+    // --- Handle video replacements ---
+    for (const [oldKey, newFileName] of Object.entries(replaceMap || {})) {
+      const uploadedFile = uploadedVideos.find(
+        (f) => f.originalname === newFileName
+      );
+      if (!uploadedFile) continue;
+
+      console.log(`🎥 Replacing video with ${uploadedFile.originalname}`);
+
+      await deleteVideoSet(propertyId);
+      property.videos = [{ videoStatus: "queued" }];
+      await Property.findByIdAndUpdate(propertyId, { videos: property.videos });
+
+      // Queue new video upload
+      enqueueVideoUpload(() => {
+        return runVideoWorker(
+          uploadedFile.path,
+          uploadedFile.originalname,
+          propertyId
+        );
+      });
+
+      // safeDeleteSync(uploadedFile.path);
+    }
+
+    // --- Handle new video uploads (queue-based) ---
+    for (const file of uploadedVideos) {
+      console.log(`🎬 Queuing new video upload: ${file.originalname}`);
+
+      property.videos = [{ videoStatus: "queued" }];
+      await Property.findByIdAndUpdate(propertyId, { videos: property.videos });
+
+      enqueueVideoUpload(() => {
+        return runVideoWorker(file.path, file.originalname, propertyId);
+      });
+
+      // safeDeleteSync(file.path);
+    }
+
+    // --- Handle replaced image deletions ---
     for (const key of keysToDeleteAfterCommit) {
       try {
-        // Find if this key corresponds to a video in original videos -> then delete its thumbnail too (we queued thumbnails separately earlier)
-        const vid = originalVideos.find((v) => v.key === key);
-        if (vid?.thumbnailKey) {
-          try {
-            await deleteFile(vid.thumbnailKey);
-          } catch (err) {
-            console.error(
-              `Failed to delete thumbnail ${vid.thumbnailKey} for replaced video ${key}:`,
-              err
-            );
-          }
-        }
-
         await deleteFile(key);
-        // remove from originalImages/originalVideos
-        let idx = originalImages.findIndex((i) => i.key === key);
-        if (idx !== -1) originalImages.splice(idx, 1);
-        idx = originalVideos.findIndex((v) => v.key === key);
-        if (idx !== -1) originalVideos.splice(idx, 1);
       } catch (err) {
-        console.error(
-          `Failed to delete replacement old key ${key} from R2:`,
-          err
-        );
-        // continue - already uploaded new files; leaving orphaned old files is not great but we don't want to rollback uploaded new content.
+        console.error(`Failed to delete replaced key ${key}:`, err);
       }
     }
 
-    // Also process thumbnailsToDeleteAfterCommit (some may be duplicates; safe)
-    for (const thumbKey of thumbnailsToDeleteAfterCommit) {
-      try {
-        await deleteFile(thumbKey);
-      } catch (err) {
-        console.error(`Failed to delete thumbnailKey ${thumbKey}:`, err);
-      }
-    }
+    // --- Commit image updates (videos handled async) ---
+    const updatedImages = [
+      ...(property.images || []),
+      ...pendingImageUpdates.map((img) => ({ key: img.key })),
+    ];
 
-    // --- 3) Commit to property object in memory (only now) ---
-    // Remove any images/videos whose keys were removed by client or replaced (we already spliced originals)
-    property.images = originalImages;
-    property.videos = originalVideos;
-
-    // Append newly uploaded images & videos
-    // pendingImageUpdates items are { key }
-    pendingImageUpdates.forEach((img) =>
-      property.images.push({ key: img.key })
-    );
-    // pendingVideoUpdates items are { key, thumbnailKey }
-    pendingVideoUpdates.forEach((vid) =>
-      property.videos.push({ key: vid.key, thumbnailKey: vid.thumbnailKey })
-    );
-
-    // 4) Update other fields (except agent)
+    // --- Build update payload ---
     const ignoredKeys = [
       "removedImages",
       "removedVideos",
@@ -759,31 +683,42 @@ const updateProperty = async (req, res) => {
       "createdBy",
       "updatedBy",
     ];
-    Object.keys(req.body).forEach((key) => {
-      if (!ignoredKeys.includes(key)) property[key] = req.body[key];
+
+    const updateFields = Object.keys(req.body).reduce((acc, key) => {
+      if (!ignoredKeys.includes(key)) acc[key] = req.body[key];
+      return acc;
+    }, {});
+
+    // ✅ Use findByIdAndUpdate to avoid VersionError
+    const updatedProperty = await Property.findByIdAndUpdate(
+      propertyId,
+      {
+        $set: {
+          ...updateFields,
+          agent: superAdmin._id,
+          updatedBy: req.user?._id || property.updatedBy,
+          images: updatedImages,
+          updatedAt: new Date(),
+        },
+      },
+      { new: true }
+    );
+
+    // ✅ Respond early — videos will finish later
+    res.status(202).json({
+      success: true,
+      message:
+        "Property updated successfully. Videos (if any) are processing in background.",
+      status: "queued",
+      data: updatedProperty,
     });
 
-    // Save property
-    await property.save();
-
-    // 5) Cleanup local temp files now that everything succeeded
-    for (const p of localTempFiles) {
-      try {
-        safeDeleteSync(p);
-      } catch (err) {
-        console.error(
-          "Failed to delete local temp file during cleanup:",
-          p,
-          err
-        );
-      }
-    }
-
-    res.json({ success: true, data: property });
+    // --- Local cleanup ---
+    for (const p of localTempFiles) safeDeleteSync(p);
   } catch (error) {
-    console.error("Update Property Error (will rollback):", error);
+    console.error("❌ Update Property Error:", error);
 
-    // Rollback: delete any new R2 keys uploaded during this operation
+    // Rollback uploaded keys if needed
     try {
       if (r2UploadedKeys.length > 0) {
         await Promise.all(
@@ -791,39 +726,81 @@ const updateProperty = async (req, res) => {
             try {
               await deleteFile(k);
             } catch (err) {
-              console.error(
-                `Rollback: failed to delete uploaded R2 key ${k}:`,
-                err
-              );
+              console.error(`Rollback delete failed for ${k}:`, err.message);
             }
           })
         );
       }
-    } catch (err) {
-      console.error("Rollback R2 deletion error:", err);
+      for (const p of localTempFiles) safeDeleteSync(p);
+    } catch (cleanupErr) {
+      console.error("Rollback cleanup error:", cleanupErr);
     }
 
-    // Cleanup local temp files
-    try {
-      for (const p of localTempFiles) {
-        try {
-          safeDeleteSync(p);
-        } catch (err) {
-          console.error("Rollback: failed to delete local temp file:", p, err);
-        }
-      }
-    } catch (err) {
-      console.error("Rollback local cleanup error:", err);
-    }
-
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: error.message || "Update failed and rollback executed",
-      });
+    res.status(500).json({
+      success: false,
+      message: error.message || "Update failed and rollback executed",
+    });
   }
 };
+
+// --- Worker spawn helper ---
+function runVideoWorker(tempPath, originalName, propertyId) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(
+      path.resolve(__dirname, "../workers/videoWorker.js"),
+      {
+        workerData: { tempPath, originalName, propertyId },
+      }
+    );
+
+    worker.on("message", async (result) => {
+      if (result.success) {
+        console.log("✅ HLS Upload Completed:", propertyId);
+        await Property.findOneAndUpdate(
+          { _id: propertyId, "videos.videoStatus": "queued" },
+          {
+            $set: {
+              "videos.$.videoStatus": "completed",
+              "videos.$.masterKey": result.masterKey,
+              "videos.$.thumbnailKey": result.thumbKey,
+              "videos.$.qualityKeys": result.qualityKeys,
+            },
+          }
+        );
+      } else {
+        console.error("❌ Worker failed:", result.error);
+        await Property.findOneAndUpdate(
+          { _id: propertyId, "videos.videoStatus": "queued" },
+          {
+            $set: {
+              "videos.$.videoStatus": "error",
+              errorMessage: result.error,
+            },
+          }
+        );
+      }
+      resolve();
+    });
+
+    worker.on("error", async (err) => {
+      console.error("🚨 Worker crashed:", err.message);
+      await Property.findOneAndUpdate(
+        { _id: propertyId, "videos.videoStatus": "queued" },
+        {
+          $set: {
+            "videos.$.videoStatus": "failed",
+            errorMessage: err.message,
+          },
+        }
+      );
+      resolve();
+    });
+
+    worker.on("exit", (code) => {
+      if (code !== 0) console.error(`⚠️ Worker exited with code ${code}`);
+    });
+  });
+}
 
 /**
  * Upload images for existing property
@@ -923,95 +900,111 @@ const uploadPropertyImages = async (req, res) => {
  */
 const uploadPropertyVideos = async (req, res) => {
   try {
-    const property = await Property.findOne({
-      _id: req.params.id,
-      isDeleted: false,
-    });
+    const propertyId = req.params.id;
+    const file = req.files?.videos?.[0];
+    if (!file)
+      return res
+        .status(400)
+        .json({ success: false, message: "No video file uploaded" });
+
+    const property = await Property.findById(propertyId);
     if (!property)
       return res
         .status(404)
         .json({ success: false, message: "Property not found" });
 
-    const videos = req.files?.videos || [];
-
-    if (videos.length > 1) {
-      // Cleanup temp
-      videos.forEach((file) => {
-        try {
-          safeDeleteSync(file.path);
-        } catch {}
-      });
-
+    if (property.videos.length >= 1) {
+      safeDeleteSync(file.path);
       return res.status(400).json({
         success: false,
-        message: "You can upload only 1 video per request.",
+        message:
+          "Only one video allowed per property. Remove existing video first.",
       });
     }
 
-    if (videos.length === 0)
-      return res
-        .status(400)
-        .json({ success: false, message: "No videos provided" });
+    // Step 1️⃣ Add video as queued
+    property.videos.push({ videoStatus: "queued" });
+    await property.save();
 
-    if (!property.videos) property.videos = [];
+    // Step 2️⃣ Respond early
+    res.status(202).json({
+      success: true,
+      message: "Video upload started. Processing in background.",
+      status: "queued",
+    });
 
-    // Tracking for rollback within this endpoint
-    const r2UploadedKeys = [];
-    const localTempFiles = [];
+    // Step 3️⃣ Worker for processing
+    const tempPath = file.path;
+    const originalName = file.originalname;
 
-    try {
-      for (const file of videos) {
-        // Use processVideoUpload helper which handles conversion and thumbnail generation and tracks local files
-        const result = await processVideoUpload({
-          file,
-          propertyId: property._id,
-          r2UploadedKeys,
-          localTempFiles,
-        });
-
-        // Add to property in memory
-        property.videos.push({
-          key: result.key,
-          thumbnailKey: result.thumbnailKey,
-        });
-
-        // cleanup local temp files for this video - we will still track localTempFiles for rollback safety
-        // but safeDeleteSync will remove immediately where possible
-        // (processVideoUpload already pushed file paths to localTempFiles)
-      }
-
-      await property.save();
-
-      // After successful save, cleanup local temp files
-      for (const p of localTempFiles) safeDeleteSync(p);
-
-      res.status(200).json({
-        success: true,
-        message: "Videos uploaded successfully",
-        data: property.videos,
-      });
-    } catch (err) {
-      // rollback any uploaded keys
-      await Promise.all(
-        r2UploadedKeys.map(async (k) => {
-          try {
-            await deleteFile(k);
-          } catch (err2) {
-            console.error("Rollback failed to delete key:", k, err2);
+    enqueueVideoUpload(() => {
+      return new Promise((resolve, reject) => {
+        const worker = new Worker(
+          path.resolve(__dirname, "../workers/videoWorker.js"),
+          {
+            workerData: { tempPath, originalName, propertyId },
           }
-        })
-      );
-      // cleanup local files
-      for (const p of localTempFiles) safeDeleteSync(p);
+        );
 
-      throw err;
-    }
-  } catch (error) {
-    console.error("Upload videos error:", error);
+        worker.on("message", async (result) => {
+          if (result.success) {
+            console.log("✅ HLS Upload Completed:", propertyId);
+            console.log('result:', result);
+            await Property.findOneAndUpdate(
+              { _id: propertyId, "videos.videoStatus": "queued" },
+              {
+                $set: {
+                  "videos.$.videoStatus": "completed",
+                  "videos.$.masterKey": result.masterKey,
+                  "videos.$.thumbnailKey": result.thumbKey,
+                  "videos.$.qualityKeys": result.qualityKeys,
+                },
+              }
+            );
+          } else {
+            console.error("❌ Worker Failed:", result.error);
+            await Property.findOneAndUpdate(
+              { _id: propertyId, "videos.videoStatus": "queued" },
+              {
+                $set: {
+                  "videos.$.videoStatus": "error",
+                  errorMessage: result.error,
+                },
+              }
+            );
+          }
+          resolve();
+        });
+
+        worker.on("error", async (err) => {
+          console.error("🚨 Worker Crashed:", err.message);
+          await Property.findOneAndUpdate(
+            { _id: propertyId, "videos.videoStatus": "queued" },
+            {
+              $set: {
+                "videos.$.videoStatus": "failed",
+                errorMessage: err.message,
+              },
+            }
+          );
+          resolve();
+        });
+
+        worker.on("exit", (code) => {
+          if (code !== 0) console.error(`⚠️ Worker exited with code ${code}`);
+        });
+      });
+    });
+  } catch (err) {
+    console.error("Upload Property Video Error:", err);
+    if (req.files)
+      Object.values(req.files)
+        .flat()
+        .forEach((file) => safeDeleteSync(file.path));
+
     res.status(500).json({
       success: false,
-      message: "Failed to upload videos",
-      error: error.message,
+      message: err.message || "Video upload failed",
     });
   }
 };
@@ -1027,12 +1020,31 @@ const getAdminProperties = async (req, res) => {
 
     const filter = { isDeleted: { $ne: true } };
 
+    if (req.query.search) {
+      const searchRegex = new RegExp(req.query.search, "i");
+
+      // Find users matching search in name (createdBy or updatedBy)
+      const matchedUsers = await User.find({
+        name: searchRegex,
+      })
+        .select("_id")
+        .lean();
+
+      const matchedUserIds = matchedUsers.map((user) => user._id);
+
+      filter.$or = [
+        { title: searchRegex },
+        { description: searchRegex },
+        { bedrooms: searchRegex },
+        { createdBy: { $in: matchedUserIds } }, // match createdBy user IDs
+        { updatedBy: { $in: matchedUserIds } }, // match updatedBy user IDs
+      ];
+    }
+
     // Show only own properties if role is admin
     if (req.user.role === "admin") {
       filter.createdBy = req.user._id;
     }
-
-    // Apply other filters/search as needed...
 
     const total = await Property.countDocuments(filter);
     const properties = await Property.find(filter)
@@ -1043,7 +1055,7 @@ const getAdminProperties = async (req, res) => {
       .populate("updatedBy", "name email phone")
       .lean();
 
-    // Map media presigned URLs (reuse your existing functions as needed)
+    // 🔹 Keep image logic same
     const propertiesWithUrls = await Promise.all(
       properties.map(async (prop) => {
         const images = await Promise.all(
@@ -1055,16 +1067,32 @@ const getAdminProperties = async (req, res) => {
             }))
         );
 
+        // 🔹 Updated video logic (same structure as getProperty)
         const videos = await Promise.all(
-          (prop.videos || [])
-            .filter((vid) => vid.key)
-            .map(async (vid) => ({
+          (prop.videos || []).map(async (vid) => {
+            const result = {
               ...vid,
-              presignUrl: await getPresignedUrl(vid.key),
+              masterProxyUrl: vid.masterKey
+                ? `/api/r2proxy/${vid.masterKey}`
+                : null,
               thumbnail: vid.thumbnailKey
                 ? await getPresignedUrl(vid.thumbnailKey)
                 : null,
-            }))
+              qualityUrls: {},
+              qualityProxyUrls: {},
+            };
+
+            if (vid.qualityKeys) {
+              for (const [quality, key] of Object.entries(vid.qualityKeys)) {
+                if (key) {
+                  result.qualityUrls[quality] = await getPresignedUrl(key);
+                  result.qualityProxyUrls[quality] = `/api/r2proxy/${key}`;
+                }
+              }
+            }
+
+            return result;
+          })
         );
 
         return {
@@ -1074,6 +1102,7 @@ const getAdminProperties = async (req, res) => {
         };
       })
     );
+
     res.status(200).json({
       success: true,
       count: properties.length,
@@ -1096,6 +1125,74 @@ const getAdminProperties = async (req, res) => {
     });
   }
 };
+
+
+// ✅ GET /api/properties/:id/status
+const checkVideoStatus = async (req, res) => {
+  try {
+    const propertyId = req.params.id;
+    const property = await Property.findById(propertyId)
+      .populate("createdBy", "name email phone")
+      .populate("updatedBy", "name email phone")
+      .lean();
+
+    if (!property) {
+      return res.status(404).json({
+        success: false,
+        message: "Property not found",
+      });
+    }
+
+    // 🔹 Rebuild videos with proxy + presigned URLs (same as getAdminProperties)
+    const videos = await Promise.all(
+      (property.videos || []).map(async (vid) => {
+        const result = {
+          ...vid,
+          masterProxyUrl: vid.masterKey
+            ? `/api/r2proxy/${vid.masterKey}`
+            : null,
+          thumbnail: vid.thumbnailKey
+            ? await getPresignedUrl(vid.thumbnailKey)
+            : null,
+          qualityUrls: {},
+          qualityProxyUrls: {},
+        };
+
+        if (vid.qualityKeys) {
+          for (const [quality, key] of Object.entries(vid.qualityKeys)) {
+            if (key) {
+              result.qualityUrls[quality] = await getPresignedUrl(key);
+              result.qualityProxyUrls[quality] = `/api/r2proxy/${key}`;
+            }
+          }
+        }
+
+        return result;
+      })
+    );
+
+    res.status(200).json({
+      success: true,
+      data: {
+        _id: property._id,
+        title: property.title,
+        location: property.location,
+        createdBy: property.createdBy,
+        updatedBy: property.updatedBy,
+        videoCount: videos.length,
+        videos,
+      },
+    });
+  } catch (error) {
+    console.error("Check video status error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to check video status",
+      error: error.message,
+    });
+  }
+};
+
 
 
 /**
@@ -1243,69 +1340,83 @@ const deleteProperty = async (req, res) => {
  * @route   DELETE /api/properties/admin/:id/permanent
  */
 const permanentDelete = async (req, res) => {
-    try {
-      const property = await Property.findById(req.params.id);
+  try {
+    const propertyId = req.params.id;
+    const property = await Property.findById(propertyId);
 
-      if (!property) {
-        return res.status(404).json({
-          success: false,
-          message: "Property not found",
-        });
-      }
-
-      // Delete images from R2
-      if (property.images && property.images.length > 0) {
-        for (const image of property.images) {
-          if (image.key) {
-            try {
-              await deleteFile(image.key);
-            } catch (error) {
-               res.status(500).json({
-                 success: false,
-                 message: "Failed to delete property images",
-                 error: error.message,
-               });
-              console.error(`Failed to delete image ${image.key}:`, error);
-            }
-          }
-        }
-      }
-
-      // Delete videos from R2
-      if (property.videos && property.videos.length > 0) {
-        for (const video of property.videos) {
-          if (video.key && video.thumbnailKey) {
-            try {
-              await deleteFile(video.key);
-              await deleteFile(video.thumbnailKey);
-            } catch (error) {
-               res.status(500).json({
-                 success: false,
-                 message: "Failed to delete property videos",
-                 error: error.message,
-               });
-              console.error(`Failed to delete video ${video.key}:`, error);
-            }
-          }
-        }
-      }
-
-      // Permanently delete from database
-      await Property.findByIdAndDelete(req.params.id);
-
-      res.status(200).json({
-        success: true,
-        message: "Property permanently deleted successfully",
-      });
-    } catch (error) {
-      console.error("Permanent delete property error:", error);
-      res.status(500).json({
+    if (!property) {
+      return res.status(404).json({
         success: false,
-        message: "Failed to permanently delete property",
-        error: error.message,
+        message: "Property not found",
       });
     }
-}
+
+    // 🖼️ Delete all images from R2
+    if (property.images?.length > 0) {
+      for (const image of property.images) {
+        if (image.key) {
+          try {
+            await deleteFile(image.key);
+            console.log(`🗑️ Deleted image: ${image.key}`);
+          } catch (error) {
+            console.error(
+              `⚠️ Failed to delete image ${image.key}:`,
+              error.message
+            );
+          }
+        }
+      }
+    }
+
+    // 🎬 Delete all videos (each entry may contain masterKey + thumbnail)
+    if (property.videos?.length > 0) {
+      for (const video of property.videos) {
+        try {
+          // Derive the propertyId from the key if available
+          let targetPropertyId = propertyId;
+          if (video.masterKey) {
+            const match = video.masterKey.match(/properties\/([^/]+)\//);
+            if (match && match[1]) {
+              targetPropertyId = match[1];
+            }
+          }
+
+          // Delete all .m3u8, .ts, and thumbnails under /videos/
+          await deleteVideoSet(targetPropertyId);
+          console.log(
+            `✅ Deleted all video files for property ${targetPropertyId}`
+          );
+
+          // If you want to be extra safe, delete the thumbnailKey separately (optional)
+          if (video.thumbnailKey) {
+            await deleteFile(video.thumbnailKey);
+            console.log(`🗑️ Deleted thumbnail: ${video.thumbnailKey}`);
+          }
+        } catch (error) {
+          console.error(
+            `❌ Failed to delete video set for property ${propertyId}:`,
+            error.message
+          );
+        }
+      }
+    }
+
+    // 🧹 Delete property from database
+    await Property.findByIdAndDelete(propertyId);
+
+    res.status(200).json({
+      success: true,
+      message: "Property permanently deleted successfully",
+    });
+  } catch (error) {
+    console.error("❌ Permanent delete property error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to permanently delete property",
+      error: error.message,
+    });
+  }
+};
 
 module.exports = {
   getProperties,
@@ -1318,5 +1429,7 @@ module.exports = {
   getAdminProperties,
   getDeletedProperties,
   permanentDelete,
+  safeDeleteSync,
+  checkVideoStatus,
   upload,
 };

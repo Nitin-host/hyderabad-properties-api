@@ -89,6 +89,8 @@ app.use("/api/auth", require("./routes/userRoutes"));
 app.use("/api/properties", require("./routes/propertyRoutes"));
 app.use("/api", require("./routes/contact"));
 
+app.use("/api", require("./services/r2Proxy"));
+
 // Global error handler
 app.use((err, req, res, next) => {
   // logger.error(`${err.name}: ${err.message}`, {
