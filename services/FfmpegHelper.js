@@ -27,10 +27,10 @@ function log(...args) {
 function runFfmpeg(args, opts = {}) {
   return new Promise((resolve, reject) => {
     const timeoutMs = opts.timeoutMs || 5 * 60 * 1000;
-    const child = spawn(FFMPEG_PATH, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      cwd: opts.cwd || process.cwd(),
-    });
+   const child = spawn(FFMPEG_PATH, ["-loglevel", "error", ...args], {
+     stdio: ["ignore", "pipe", "pipe"],
+     cwd: opts.cwd || process.cwd(),
+   });
 
     let stderr = "";
     let stdout = "";
