@@ -13,6 +13,7 @@ const {
   getDeletedProperties,
   permanentDelete,
   checkVideoStatus,
+  getPropertyBySlug,
 } = require('../controllers/propertyController');
 const {
   validateCreateProperty,
@@ -39,6 +40,7 @@ router.get("/admin", protect, adminOrSuperAdmin, getAdminProperties);
  * @route   GET /api/properties/:id
  * @access  Public
  */
+router.get('/slug/:slug', getPropertyBySlug);
 router.get('/:id', validatePropertyId, getProperty);
 
 // Protected routes (require authentication)

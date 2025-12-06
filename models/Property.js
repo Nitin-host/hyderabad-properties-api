@@ -1,7 +1,9 @@
   const mongoose = require("mongoose");
+  const slugify = require("slugify");
 
   const PropertySchema = new mongoose.Schema(
     {
+      slug: { type: String, unique: true },
       title: {
         type: String,
         required: [true, "Please add a title"],
@@ -112,7 +114,13 @@
       },
       additionalRooms: {
         type: String,
-        enum: ["Puja Room", "Study Room", "Servant Room", "Store Room", "Other"],
+        enum: [
+          "Puja Room",
+          "Study Room",
+          "Servant Room",
+          "Store Room",
+          "Other",
+        ],
       },
       waterAvailability: {
         type: String,
@@ -159,7 +167,14 @@
           },
           videoStatus: {
             type: String,
-            enum: ["queued", "processing", "completed", "failed", "error", "ready"],
+            enum: [
+              "queued",
+              "processing",
+              "completed",
+              "failed",
+              "error",
+              "ready",
+            ],
             default: "queued",
           },
           errorMessage: { type: String, default: "" },
@@ -221,5 +236,27 @@
     this.updatedAt = Date.now();
     next();
   });
+
+  // Auto-generate slug before saving
+PropertySchema.pre("save", async function (next) {
+  if (this.isModified("title") || this.isModified("bedrooms") || this.isModified("location")) {
+    const baseSlug = slugify(
+      `${this.bedrooms}-${this.title}-${this.location}`,
+      { lower: true, strict: true }
+    );
+
+    let finalSlug = baseSlug;
+    let counter = 1;
+
+    // Ensure unique slug
+    while (await mongoose.models.Property.findOne({ slug: finalSlug })) {
+      finalSlug = `${baseSlug}-${counter++}`;
+    }
+
+    this.slug = finalSlug;
+  }
+
+  next();
+});
 
   module.exports = mongoose.model("Property", PropertySchema);
