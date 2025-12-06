@@ -427,6 +427,76 @@ const getProperty = async (req, res) => {
 };
 
 /**
+ *  @desc Get the property by slug
+ */
+const getPropertyBySlug = async (req, res) => {
+   try {
+     const property = await Property.findOne({ slug: req.params.slug });
+     if (!property) {
+       return res.status(404).json({ message: "Property not found" });
+     }
+     // 🖼️ Generate presigned + proxy URLs for all images
+     const images = await Promise.all(
+       (property.images || []).map(async (img) => {
+         const presigned = img.key ? await getPresignedUrl(img.key) : null;
+         const proxy = img.key ? `/api/r2proxy/${img.key}` : null;
+         return {
+           ...img.toObject(),
+           presignUrl: presigned,
+           proxyUrl: proxy,
+         };
+       })
+     );
+
+     // 🎥 Generate presigned + proxy URLs for videos
+     const videos = await Promise.all(
+       (property.videos || []).map(async (vid) => {
+         const result = {
+           ...vid.toObject(),
+           presignUrl: vid.masterKey
+             ? await getPresignedUrl(vid.masterKey)
+             : null,
+           masterProxyUrl: vid.masterKey
+             ? `/api/r2proxy/${vid.masterKey}`
+             : null,
+           thumbnail: vid.thumbnailKey
+             ? await getPresignedUrl(vid.thumbnailKey)
+             : null,
+           thumbnailProxyUrl: vid.thumbnailKey
+             ? `/api/r2proxy/${vid.thumbnailKey}`
+             : null,
+           qualityUrls: {},
+           qualityProxyUrls: {},
+         };
+
+         // Generate presigned + proxy URLs for each quality level
+         if (vid.qualityKeys) {
+           for (const [quality, key] of Object.entries(vid.qualityKeys)) {
+             if (key) {
+               result.qualityUrls[quality] = await getPresignedUrl(key);
+               result.qualityProxyUrls[quality] = `/api/r2proxy/${key}`;
+             }
+           }
+         }
+
+         return result;
+       })
+     );
+      // ✅ Final response
+      res.status(200).json({
+        success: true,
+        data: {
+          ...property.toObject(),
+          images,
+          videos,
+        },
+      });
+   } catch (err) {
+     res.status(500).json({ error: err.message });
+   }
+}
+
+/**
  * @desc    Create new property
  * @route   POST /api/properties
  * @access  Private
@@ -1432,4 +1502,5 @@ module.exports = {
   safeDeleteSync,
   checkVideoStatus,
   upload,
+  getPropertyBySlug
 };
