@@ -435,6 +435,10 @@ const getPropertyBySlug = async (req, res) => {
      if (!property) {
        return res.status(404).json({ message: "Property not found" });
      }
+
+     // Fetch super admin (for global contact)
+     const superAdmin = await User.findOne({ role: "super_admin" });
+     
      // 🖼️ Generate presigned + proxy URLs for all images
      const images = await Promise.all(
        (property.images || []).map(async (img) => {
@@ -482,15 +486,24 @@ const getPropertyBySlug = async (req, res) => {
          return result;
        })
      );
-      // ✅ Final response
-      res.status(200).json({
-        success: true,
-        data: {
-          ...property.toObject(),
-          images,
-          videos,
-        },
-      });
+     // ✅ Final response
+     res.status(200).json({
+       success: true,
+       data: {
+         ...property.toObject(),
+         agent: superAdmin
+           ? {
+               _id: superAdmin._id,
+               name: superAdmin.name,
+               email: superAdmin.email,
+               phone: superAdmin.phone,
+               role: superAdmin.role,
+             }
+           : {},
+         images,
+         videos,
+       },
+     });
    } catch (err) {
      res.status(500).json({ error: err.message });
    }
