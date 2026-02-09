@@ -232,31 +232,28 @@
   PropertySchema.index({ isDeleted: 1 });
   PropertySchema.index({ createdAt: -1 });
 
-  PropertySchema.pre("save", function (next) {
+  PropertySchema.pre("save", async function () {
     this.updatedAt = Date.now();
-    next();
-  });
 
-  // Auto-generate slug before saving
-PropertySchema.pre("save", async function (next) {
-  if (this.isModified("title") || this.isModified("bedrooms") || this.isModified("location")) {
-    const baseSlug = slugify(
-      `${this.bedrooms}-${this.title}-${this.location}`,
-      { lower: true, strict: true }
-    );
+    if (
+      this.isModified("title") ||
+      this.isModified("bedrooms") ||
+      this.isModified("location")
+    ) {
+      const baseSlug = slugify(
+        `${this.bedrooms}-${this.title}-${this.location}`,
+        { lower: true, strict: true },
+      );
 
-    let finalSlug = baseSlug;
-    let counter = 1;
+      let finalSlug = baseSlug;
+      let counter = 1;
 
-    // Ensure unique slug
-    while (await mongoose.models.Property.findOne({ slug: finalSlug })) {
-      finalSlug = `${baseSlug}-${counter++}`;
+      while (await mongoose.models.Property.findOne({ slug: finalSlug })) {
+        finalSlug = `${baseSlug}-${counter++}`;
+      }
+
+      this.slug = finalSlug;
     }
-
-    this.slug = finalSlug;
-  }
-
-  next();
-});
+  });
 
   module.exports = mongoose.model("Property", PropertySchema);
