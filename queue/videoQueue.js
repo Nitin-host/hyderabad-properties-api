@@ -3,9 +3,9 @@ const dotenv = require("dotenv");
 dotenv.config();
 
 // Convert env var to number safely
-const concurrency = Number(process.env.VIDEO_UPLOAD_CONCURRENCY);
+const parsed = Number(process.env.VIDEO_UPLOAD_CONCURRENCY);
+const concurrency = Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
 
-// Only process N uploads at a time
 const videoQueue = new PQueue({ concurrency });
 
 function enqueueVideoUpload(taskFn) {

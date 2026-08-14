@@ -5,9 +5,13 @@ const {
 const User = require("../models/User");
 const {
   uploadStream,
-  getPresignedUrl,
   deleteFile,
   deleteVideoSet,
+  deletePropertyMedia,
+  createMultipartUpload,
+  uploadPart,
+  completeMultipartUpload,
+  abortMultipartUpload,
 } = require("../services/r2Service");
 const multer = require("multer");
 const path = require("path");
@@ -15,6 +19,61 @@ const fs = require("fs");
 const { convertToMp4 } = require("../services/VideoConvertor");
 const { Worker } = require("worker_threads");
 const { enqueueVideoUpload } = require("../queue/videoQueue");
+const {
+  getCachedSuperAdmin,
+  mapImages,
+  mapVideos,
+} = require("../services/mediaUrls");
+
+const LIST_SELECT =
+  "title price location landmarks bedrooms bathrooms size sizeUnit parking amenities status images slug furnished propertyType createdAt";
+
+const VIDEO_PART_SIZE = 8 * 1024 * 1024;
+
+function shouldProcessVideoInApi() {
+  return process.env.VIDEO_PROCESS_IN_API === "true";
+}
+
+async function purgePropertyMedia(propertyId) {
+  try {
+    await deletePropertyMedia(propertyId);
+  } catch (err) {
+    console.error(`Failed to purge R2 media for ${propertyId}:`, err.message);
+  }
+}
+
+async function purgePropertyVideos(propertyId, options = {}) {
+  try {
+    await deleteVideoSet(propertyId, options);
+  } catch (err) {
+    console.error(`Failed to purge videos for ${propertyId}:`, err.message);
+  }
+}
+
+async function queueLocalVideoAsSource(file, propertyId) {
+  const safeName = sanitizeFileName(file.originalname);
+  const key = `properties/${propertyId}/source/${Date.now()}-${safeName}`;
+  await uploadFileToR2(file.path, key, file.mimetype || "video/mp4");
+  safeDeleteSync(file.path);
+  await Property.findByIdAndUpdate(propertyId, {
+    videos: [
+      {
+        videoStatus: "queued",
+        sourceKey: key,
+        originalName: file.originalname,
+      },
+    ],
+  });
+  return key;
+}
+
+function escapeRegex(value = "") {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function sanitizeFileName(name = "video.mp4") {
+  return path.basename(name).replace(/[^a-zA-Z0-9._-]/g, "_") || "video.mp4";
+}
 
 // Detect environment
 const isRailway = !!process.env.RAILWAY_ENVIRONMENT;
@@ -40,6 +99,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
+  limits: { fileSize: 80 * 1024 * 1024, files: 21 },
   fileFilter: (req, file, cb) => {
     if (file.fieldname === "images" && file.mimetype.startsWith("image/"))
       cb(null, true);
@@ -49,6 +109,11 @@ const upload = multer({
       cb(null, true);
     else cb(new Error("Invalid file type"), false);
   },
+});
+
+const chunkUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 12 * 1024 * 1024 },
 });
 
 // Utility to remove empty string fields recursively
@@ -206,101 +271,71 @@ function safeParseObject(bodyField, fieldName) {
 const getProperties = async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
     const skip = (page - 1) * limit;
 
-    // Base filter for non-deleted properties
-    const filter = { isDeleted: { $ne: true } };
+    const filter = { isDeleted: false };
 
-    // Apply query filters dynamically
     const queryFields = ["propertyType", "bedrooms", "furnished"];
     queryFields.forEach((field) => {
       if (req.query[field]) filter[field] = req.query[field];
     });
 
     if (req.query.location) {
-      filter.location = { $regex: req.query.location, $options: "i" };
+      filter.location = { $regex: escapeRegex(req.query.location), $options: "i" };
     }
 
     if (req.query.minPrice || req.query.maxPrice) {
       filter.price = {};
-      if (req.query.minPrice) filter.price.$gte = parseInt(req.query.minPrice);
-      if (req.query.maxPrice) filter.price.$lte = parseInt(req.query.maxPrice);
+      if (req.query.minPrice) filter.price.$gte = parseInt(req.query.minPrice, 10);
+      if (req.query.maxPrice) filter.price.$lte = parseInt(req.query.maxPrice, 10);
     }
 
     if (req.query.minSize || req.query.maxSize) {
       filter.size = {};
-      if (req.query.minSize) filter.size.$gte = parseInt(req.query.minSize);
-      if (req.query.maxSize) filter.size.$lte = parseInt(req.query.maxSize);
+      if (req.query.minSize) filter.size.$gte = parseInt(req.query.minSize, 10);
+      if (req.query.maxSize) filter.size.$lte = parseInt(req.query.maxSize, 10);
+    }
+
+    if (req.query.ids) {
+      const ids = String(req.query.ids)
+        .split(",")
+        .map((id) => id.trim())
+        .filter((id) => /^[a-fA-F0-9]{24}$/.test(id));
+      if (ids.length) {
+        filter._id = { $in: ids };
+      }
     }
 
     if (req.query.search) {
-      const searchRegex = new RegExp(req.query.search, "i");
-
-      // Find users matching search in name (createdBy or updatedBy)
-      const matchedUsers = await User.find({
-        name: searchRegex,
-      })
-        .select("_id")
-        .lean();
-
-      const matchedUserIds = matchedUsers.map((user) => user._id);
-
-      filter.$or = [
-        { title: searchRegex },
-        { description: searchRegex },
-        { bedrooms: searchRegex },
-        { createdBy: { $in: matchedUserIds } }, // match createdBy user IDs
-        { updatedBy: { $in: matchedUserIds } }, // match updatedBy user IDs
-      ];
+      const q = String(req.query.search).trim();
+      if (q.length >= 3) {
+        filter.$text = { $search: q };
+      } else if (q) {
+        filter.title = new RegExp(escapeRegex(q), "i");
+      }
     }
 
-    // Total count for pagination
-    const total = await Property.countDocuments(filter);
+    const [total, properties, superAdmin] = await Promise.all([
+      Property.countDocuments(filter),
+      Property.find(filter)
+        .select(LIST_SELECT)
+        .slice("images", 1)
+        .skip(skip)
+        .limit(limit)
+        .sort({ createdAt: -1 })
+        .lean(),
+      getCachedSuperAdmin(),
+    ]);
 
-    // Fetch super admin once
-    const superAdmin = await User.findOne({ role: "super_admin" }).select(
-      "_id name email phone role"
-    );
-
-    // Fetch properties with createdBy and updatedBy populated
-    const properties = await Property.find(filter)
-      .skip(skip)
-      .limit(limit)
-      .sort({ createdAt: -1 })
-      .populate("createdBy", "name email phone")
-      .populate("updatedBy", "name email phone")
-      .lean();
-
-    // Map images/videos to include presigned URLs
     const propertiesWithUrls = await Promise.all(
       properties.map(async (prop) => {
-        const images = await Promise.all(
-          (prop.images || [])
-            .filter((img) => img.key)
-            .map(async (img) => ({
-              ...img,
-              presignUrl: await getPresignedUrl(img.key),
-            }))
-        );
-
-        const videos = await Promise.all(
-          (prop.videos || [])
-            .filter((vid) => vid.key)
-            .map(async (vid) => ({
-              ...vid,
-              presignUrl: await getPresignedUrl(vid.key),
-              thumbnail: vid.thumbnailKey
-                ? await getPresignedUrl(vid.thumbnailKey)
-                : null,
-            }))
-        );
-
+        const images = await mapImages(prop.images, { limit: 1 });
         return {
           ...prop,
           agent: superAdmin ? superAdmin._id : null,
           images,
-          videos,
+          videos: [],
         };
       })
     );
@@ -335,10 +370,13 @@ const getProperties = async (req, res) => {
  */
 const getProperty = async (req, res) => {
   try {
-    const property = await Property.findOne({
-      _id: req.params.id,
-      isDeleted: false,
-    });
+    const [property, superAdmin] = await Promise.all([
+      Property.findOne({
+        _id: req.params.id,
+        isDeleted: false,
+      }),
+      getCachedSuperAdmin(),
+    ]);
 
     if (!property) {
       return res.status(404).json({
@@ -347,58 +385,11 @@ const getProperty = async (req, res) => {
       });
     }
 
-    // Fetch super admin (for global contact)
-    const superAdmin = await User.findOne({ role: "super_admin" });
+    const [images, videos] = await Promise.all([
+      mapImages(property.images, { includeProxy: true }),
+      mapVideos(property.videos, { full: true, playableOnly: true }),
+    ]);
 
-    // 🖼️ Generate presigned + proxy URLs for all images
-    const images = await Promise.all(
-      (property.images || []).map(async (img) => {
-        const presigned = img.key ? await getPresignedUrl(img.key) : null;
-        const proxy = img.key ? `/api/r2proxy/${img.key}` : null;
-        return {
-          ...img.toObject(),
-          presignUrl: presigned,
-          proxyUrl: proxy,
-        };
-      })
-    );
-
-    // 🎥 Generate presigned + proxy URLs for videos
-    const videos = await Promise.all(
-      (property.videos || []).map(async (vid) => {
-        const result = {
-          ...vid.toObject(),
-          presignUrl: vid.masterKey
-            ? await getPresignedUrl(vid.masterKey)
-            : null,
-          masterProxyUrl: vid.masterKey
-            ? `/api/r2proxy/${vid.masterKey}`
-            : null,
-          thumbnail: vid.thumbnailKey
-            ? await getPresignedUrl(vid.thumbnailKey)
-            : null,
-          thumbnailProxyUrl: vid.thumbnailKey
-            ? `/api/r2proxy/${vid.thumbnailKey}`
-            : null,
-          qualityUrls: {},
-          qualityProxyUrls: {},
-        };
-
-        // Generate presigned + proxy URLs for each quality level
-        if (vid.qualityKeys) {
-          for (const [quality, key] of Object.entries(vid.qualityKeys)) {
-            if (key) {
-              result.qualityUrls[quality] = await getPresignedUrl(key);
-              result.qualityProxyUrls[quality] = `/api/r2proxy/${key}`;
-            }
-          }
-        }
-
-        return result;
-      })
-    );
-
-    // ✅ Final response
     res.status(200).json({
       success: true,
       data: {
@@ -431,62 +422,22 @@ const getProperty = async (req, res) => {
  */
 const getPropertyBySlug = async (req, res) => {
    try {
-     const property = await Property.findOne({ slug: req.params.slug });
+     const [property, superAdmin] = await Promise.all([
+       Property.findOne({
+         slug: req.params.slug,
+         isDeleted: false,
+       }),
+       getCachedSuperAdmin(),
+     ]);
      if (!property) {
        return res.status(404).json({ message: "Property not found" });
      }
 
-     // Fetch super admin (for global contact)
-     const superAdmin = await User.findOne({ role: "super_admin" });
-     
-     // 🖼️ Generate presigned + proxy URLs for all images
-     const images = await Promise.all(
-       (property.images || []).map(async (img) => {
-         const presigned = img.key ? await getPresignedUrl(img.key) : null;
-         const proxy = img.key ? `/api/r2proxy/${img.key}` : null;
-         return {
-           ...img.toObject(),
-           presignUrl: presigned,
-           proxyUrl: proxy,
-         };
-       })
-     );
+     const [images, videos] = await Promise.all([
+       mapImages(property.images, { includeProxy: true }),
+       mapVideos(property.videos, { full: true, playableOnly: true }),
+     ]);
 
-     // 🎥 Generate presigned + proxy URLs for videos
-     const videos = await Promise.all(
-       (property.videos || []).map(async (vid) => {
-         const result = {
-           ...vid.toObject(),
-           presignUrl: vid.masterKey
-             ? await getPresignedUrl(vid.masterKey)
-             : null,
-           masterProxyUrl: vid.masterKey
-             ? `/api/r2proxy/${vid.masterKey}`
-             : null,
-           thumbnail: vid.thumbnailKey
-             ? await getPresignedUrl(vid.thumbnailKey)
-             : null,
-           thumbnailProxyUrl: vid.thumbnailKey
-             ? `/api/r2proxy/${vid.thumbnailKey}`
-             : null,
-           qualityUrls: {},
-           qualityProxyUrls: {},
-         };
-
-         // Generate presigned + proxy URLs for each quality level
-         if (vid.qualityKeys) {
-           for (const [quality, key] of Object.entries(vid.qualityKeys)) {
-             if (key) {
-               result.qualityUrls[quality] = await getPresignedUrl(key);
-               result.qualityProxyUrls[quality] = `/api/r2proxy/${key}`;
-             }
-           }
-         }
-
-         return result;
-       })
-     );
-     // ✅ Final response
      res.status(200).json({
        success: true,
        data: {
@@ -517,7 +468,7 @@ const getPropertyBySlug = async (req, res) => {
 const createProperty = async (req, res) => {
   try {
     // Fetch super_admin
-    const superAdmin = await User.findOne({ role: "super_admin" });
+    const superAdmin = await getCachedSuperAdmin();
     if (!superAdmin) {
       return res.status(500).json({
         success: false,
@@ -592,7 +543,7 @@ const updateProperty = async (req, res) => {
         .json({ success: false, message: "Property not found" });
 
     // ✅ Always attach super admin
-    const superAdmin = await User.findOne({ role: "super_admin" });
+    const superAdmin = await getCachedSuperAdmin();
     if (!superAdmin)
       return res
         .status(500)
@@ -611,14 +562,27 @@ const updateProperty = async (req, res) => {
 
     const uploadedImages = req.files?.images || [];
     const uploadedVideos = req.files?.videos || [];
+    const imageReplacements = new Map();
+    const replaceKeyToNewKey = {};
 
-    // ✅ Limit checks
-    if (
+    for (const [oldKey, newFileName] of Object.entries(replaceMap || {})) {
+      const uploadedFile = uploadedImages.find(
+        (f) =>
+          f.originalname === newFileName &&
+          ![...imageReplacements.values()].includes(f)
+      );
+      if (!uploadedFile) continue;
+      imageReplacements.set(oldKey, uploadedFile);
+      keysToDeleteAfterCommit.push(oldKey);
+    }
+
+    const nextImageCount =
       (property.images?.length || 0) -
-        removedImages.length +
-        uploadedImages.length >
-      20
-    ) {
+      removedImages.length -
+      imageReplacements.size +
+      uploadedImages.length;
+
+    if (nextImageCount > 20) {
       uploadedImages.forEach((f) => safeDeleteSync(f.path));
       return res.status(400).json({
         success: false,
@@ -626,20 +590,17 @@ const updateProperty = async (req, res) => {
       });
     }
 
-    // ✅ Count how many videos are being replaced
-    const replaceVideoCount = Object.entries(replaceMap || {}).filter(
-      ([oldKey, newFileName]) =>
-        uploadedVideos.some((f) => f.originalname === newFileName)
+    const currentVideoCount = (property.videos || []).filter(
+      (v) =>
+        v.masterKey ||
+        ["uploading", "queued", "processing"].includes(v.videoStatus)
     ).length;
-
-    // ✅ Adjusted video limit check
-    const effectiveVideos =
-      (property.videos?.masterKey || 0) -
-      removedVideos.length -
-      replaceVideoCount +
+    const nextVideoCount =
+      currentVideoCount -
+      (removedVideos.length > 0 ? currentVideoCount : 0) +
       uploadedVideos.length;
 
-    if (effectiveVideos > 1) {
+    if (nextVideoCount > 1) {
       uploadedVideos.forEach((f) => safeDeleteSync(f.path));
       return res.status(400).json({
         success: false,
@@ -648,25 +609,18 @@ const updateProperty = async (req, res) => {
       });
     }
 
-    // --- Handle image replacements ---
-    for (const [oldKey, newFileName] of Object.entries(replaceMap || {})) {
-      const uploadedFile = uploadedImages.find(
-        (f) => f.originalname === newFileName
-      );
-      if (!uploadedFile) continue;
-
+    for (const [oldKey, uploadedFile] of imageReplacements) {
       const result = await processImageUpload({
         file: uploadedFile,
         propertyId,
         r2UploadedKeys,
         localTempFiles,
       });
-      pendingImageUpdates.push(result);
-      keysToDeleteAfterCommit.push(oldKey);
+      replaceKeyToNewKey[oldKey] = result.key;
     }
 
-    // --- Handle new images ---
     for (const file of uploadedImages) {
+      if ([...imageReplacements.values()].includes(file)) continue;
       const result = await processImageUpload({
         file,
         propertyId,
@@ -685,57 +639,66 @@ const updateProperty = async (req, res) => {
           console.error(`Failed to delete image ${key}:`, err.message);
         }
       }
-      property.images = property.images.filter(
-        (img) => !removedImages.includes(img.key)
-      );
     }
+
+    property.images = (property.images || [])
+      .filter((img) => img?.key && !removedImages.includes(img.key))
+      .map((img) =>
+        replaceKeyToNewKey[img.key] ? { key: replaceKeyToNewKey[img.key] } : img
+      );
 
     // --- Handle video deletions ---
     if (removedVideos.length > 0) {
       console.log(`🗑 Removing full video set for property ${propertyId}`);
-      try {
-        await deleteVideoSet(propertyId);
-        property.videos = [];
-      } catch (err) {
-        console.error("Failed to delete video set:", err);
-      }
+      await purgePropertyVideos(propertyId);
+      property.videos = [];
     }
+
+    const processedVideoFiles = new Set();
 
     // --- Handle video replacements ---
     for (const [oldKey, newFileName] of Object.entries(replaceMap || {})) {
       const uploadedFile = uploadedVideos.find(
-        (f) => f.originalname === newFileName
+        (f) =>
+          f.originalname === newFileName && !processedVideoFiles.has(f)
       );
       if (!uploadedFile) continue;
+      processedVideoFiles.add(uploadedFile);
 
       console.log(`🎥 Replacing video with ${uploadedFile.originalname}`);
 
-      await deleteVideoSet(propertyId);
+      await purgePropertyVideos(propertyId);
       property.videos = [{ videoStatus: "queued" }];
       await Property.findByIdAndUpdate(propertyId, { videos: property.videos });
 
-      // Queue new video upload
-      enqueueVideoUpload(() => {
-        return runVideoWorker(
-          uploadedFile.path,
-          uploadedFile.originalname,
-          propertyId
-        );
-      });
-
-      // safeDeleteSync(uploadedFile.path);
+      if (shouldProcessVideoInApi()) {
+        enqueueVideoUpload(() => {
+          return runVideoWorker(
+            uploadedFile.path,
+            uploadedFile.originalname,
+            propertyId
+          );
+        });
+      } else {
+        await queueLocalVideoAsSource(uploadedFile, propertyId);
+      }
     }
 
     // --- Handle new video uploads (queue-based) ---
     for (const file of uploadedVideos) {
+      if (processedVideoFiles.has(file)) continue;
       console.log(`🎬 Queuing new video upload: ${file.originalname}`);
 
       property.videos = [{ videoStatus: "queued" }];
       await Property.findByIdAndUpdate(propertyId, { videos: property.videos });
 
-      enqueueVideoUpload(() => {
-        return runVideoWorker(file.path, file.originalname, propertyId);
-      });
+      if (shouldProcessVideoInApi()) {
+        enqueueVideoUpload(() => {
+          return runVideoWorker(file.path, file.originalname, propertyId);
+        });
+      } else {
+        await queueLocalVideoAsSource(file, propertyId);
+      }
 
       // safeDeleteSync(file.path);
     }
@@ -773,17 +736,20 @@ const updateProperty = async (req, res) => {
     }, {});
 
     // ✅ Use findByIdAndUpdate to avoid VersionError
+    const updateSet = {
+      ...updateFields,
+      agent: superAdmin._id,
+      updatedBy: req.user?._id || property.updatedBy,
+      images: updatedImages,
+      updatedAt: new Date(),
+    };
+    if (removedVideos.length > 0) {
+      updateSet.videos = [];
+    }
+
     const updatedProperty = await Property.findByIdAndUpdate(
       propertyId,
-      {
-        $set: {
-          ...updateFields,
-          agent: superAdmin._id,
-          updatedBy: req.user?._id || property.updatedBy,
-          images: updatedImages,
-          updatedAt: new Date(),
-        },
-      },
+      { $set: updateSet },
       { new: true }
     );
 
@@ -827,37 +793,51 @@ const updateProperty = async (req, res) => {
 };
 
 // --- Worker spawn helper ---
-function runVideoWorker(tempPath, originalName, propertyId) {
-  return new Promise((resolve, reject) => {
+function runVideoWorker(tempPathOrOpts, originalName, propertyId) {
+  const opts =
+    typeof tempPathOrOpts === "object" && tempPathOrOpts !== null
+      ? tempPathOrOpts
+      : { tempPath: tempPathOrOpts, originalName, propertyId };
+  const id = opts.propertyId;
+
+  return new Promise((resolve) => {
     const worker = new Worker(
       path.resolve(__dirname, "../workers/videoWorker.js"),
       {
-        workerData: { tempPath, originalName, propertyId },
+        workerData: opts,
       }
     );
 
     worker.on("message", async (result) => {
       if (result.success) {
-        console.log("✅ HLS Upload Completed:", propertyId);
+        console.log("✅ HLS Upload Completed:", id);
         await Property.findOneAndUpdate(
-          { _id: propertyId, "videos.videoStatus": "queued" },
+          { _id: id, "videos.videoStatus": { $in: ["queued", "processing"] } },
           {
             $set: {
               "videos.$.videoStatus": "completed",
               "videos.$.masterKey": result.masterKey,
               "videos.$.thumbnailKey": result.thumbKey,
               "videos.$.qualityKeys": result.qualityKeys,
+              "videos.$.sourceKey": "",
             },
           }
         );
+        if (result.sourceKey || opts.sourceKey) {
+          try {
+            await deleteFile(result.sourceKey || opts.sourceKey);
+          } catch (err) {
+            console.warn("Failed to delete source video:", err.message);
+          }
+        }
       } else {
         console.error("❌ Worker failed:", result.error);
         await Property.findOneAndUpdate(
-          { _id: propertyId, "videos.videoStatus": "queued" },
+          { _id: id, "videos.videoStatus": { $in: ["queued", "processing"] } },
           {
             $set: {
               "videos.$.videoStatus": "error",
-              errorMessage: result.error,
+              "videos.$.errorMessage": result.error,
             },
           }
         );
@@ -868,11 +848,11 @@ function runVideoWorker(tempPath, originalName, propertyId) {
     worker.on("error", async (err) => {
       console.error("🚨 Worker crashed:", err.message);
       await Property.findOneAndUpdate(
-        { _id: propertyId, "videos.videoStatus": "queued" },
+        { _id: id, "videos.videoStatus": { $in: ["queued", "processing"] } },
         {
           $set: {
             "videos.$.videoStatus": "failed",
-            errorMessage: err.message,
+            "videos.$.errorMessage": err.message,
           },
         }
       );
@@ -1005,78 +985,20 @@ const uploadPropertyVideos = async (req, res) => {
       });
     }
 
-    // Step 1️⃣ Add video as queued
-    property.videos.push({ videoStatus: "queued" });
-    await property.save();
+    if (shouldProcessVideoInApi()) {
+      property.videos = [{ videoStatus: "queued" }];
+      await property.save();
+      enqueueVideoUpload(() =>
+        runVideoWorker(file.path, file.originalname, propertyId)
+      );
+    } else {
+      await queueLocalVideoAsSource(file, propertyId);
+    }
 
-    // Step 2️⃣ Respond early
     res.status(202).json({
       success: true,
       message: "Video upload started. Processing in background.",
       status: "queued",
-    });
-
-    // Step 3️⃣ Worker for processing
-    const tempPath = file.path;
-    const originalName = file.originalname;
-
-    enqueueVideoUpload(() => {
-      return new Promise((resolve, reject) => {
-        const worker = new Worker(
-          path.resolve(__dirname, "../workers/videoWorker.js"),
-          {
-            workerData: { tempPath, originalName, propertyId },
-          }
-        );
-
-        worker.on("message", async (result) => {
-          if (result.success) {
-            console.log("✅ HLS Upload Completed:", propertyId);
-            console.log('result:', result);
-            await Property.findOneAndUpdate(
-              { _id: propertyId, "videos.videoStatus": "queued" },
-              {
-                $set: {
-                  "videos.$.videoStatus": "completed",
-                  "videos.$.masterKey": result.masterKey,
-                  "videos.$.thumbnailKey": result.thumbKey,
-                  "videos.$.qualityKeys": result.qualityKeys,
-                },
-              }
-            );
-          } else {
-            console.error("❌ Worker Failed:", result.error);
-            await Property.findOneAndUpdate(
-              { _id: propertyId, "videos.videoStatus": "queued" },
-              {
-                $set: {
-                  "videos.$.videoStatus": "error",
-                  errorMessage: result.error,
-                },
-              }
-            );
-          }
-          resolve();
-        });
-
-        worker.on("error", async (err) => {
-          console.error("🚨 Worker Crashed:", err.message);
-          await Property.findOneAndUpdate(
-            { _id: propertyId, "videos.videoStatus": "queued" },
-            {
-              $set: {
-                "videos.$.videoStatus": "failed",
-                errorMessage: err.message,
-              },
-            }
-          );
-          resolve();
-        });
-
-        worker.on("exit", (code) => {
-          if (code !== 0) console.error(`⚠️ Worker exited with code ${code}`);
-        });
-      });
     });
   } catch (err) {
     console.error("Upload Property Video Error:", err);
@@ -1085,10 +1007,12 @@ const uploadPropertyVideos = async (req, res) => {
         .flat()
         .forEach((file) => safeDeleteSync(file.path));
 
-    res.status(500).json({
-      success: false,
-      message: err.message || "Video upload failed",
-    });
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: err.message || "Video upload failed",
+      });
+    }
   }
 };
 
@@ -1098,15 +1022,14 @@ const uploadPropertyVideos = async (req, res) => {
 const getAdminProperties = async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
     const skip = (page - 1) * limit;
 
-    const filter = { isDeleted: { $ne: true } };
+    const filter = { isDeleted: false };
 
     if (req.query.search) {
-      const searchRegex = new RegExp(req.query.search, "i");
+      const searchRegex = new RegExp(escapeRegex(req.query.search), "i");
 
-      // Find users matching search in name (createdBy or updatedBy)
       const matchedUsers = await User.find({
         name: searchRegex,
       })
@@ -1119,64 +1042,32 @@ const getAdminProperties = async (req, res) => {
         { title: searchRegex },
         { description: searchRegex },
         { bedrooms: searchRegex },
-        { createdBy: { $in: matchedUserIds } }, // match createdBy user IDs
-        { updatedBy: { $in: matchedUserIds } }, // match updatedBy user IDs
+        { createdBy: { $in: matchedUserIds } },
+        { updatedBy: { $in: matchedUserIds } },
       ];
     }
 
-    // Show only own properties if role is admin
     if (req.user.role === "admin") {
       filter.createdBy = req.user._id;
     }
 
-    const total = await Property.countDocuments(filter);
-    const properties = await Property.find(filter)
-      .skip(skip)
-      .limit(limit)
-      .sort({ createdAt: -1 })
-      .populate("createdBy", "name email phone")
-      .populate("updatedBy", "name email phone")
-      .lean();
+    const [total, properties] = await Promise.all([
+      Property.countDocuments(filter),
+      Property.find(filter)
+        .skip(skip)
+        .limit(limit)
+        .sort({ createdAt: -1 })
+        .populate("createdBy", "name email phone")
+        .populate("updatedBy", "name email phone")
+        .lean(),
+    ]);
 
-    // 🔹 Keep image logic same
     const propertiesWithUrls = await Promise.all(
       properties.map(async (prop) => {
-        const images = await Promise.all(
-          (prop.images || [])
-            .filter((img) => img.key)
-            .map(async (img) => ({
-              ...img,
-              presignUrl: await getPresignedUrl(img.key),
-            }))
-        );
-
-        // 🔹 Updated video logic (same structure as getProperty)
-        const videos = await Promise.all(
-          (prop.videos || []).map(async (vid) => {
-            const result = {
-              ...vid,
-              masterProxyUrl: vid.masterKey
-                ? `/api/r2proxy/${vid.masterKey}`
-                : null,
-              thumbnail: vid.thumbnailKey
-                ? await getPresignedUrl(vid.thumbnailKey)
-                : null,
-              qualityUrls: {},
-              qualityProxyUrls: {},
-            };
-
-            if (vid.qualityKeys) {
-              for (const [quality, key] of Object.entries(vid.qualityKeys)) {
-                if (key) {
-                  result.qualityUrls[quality] = await getPresignedUrl(key);
-                  result.qualityProxyUrls[quality] = `/api/r2proxy/${key}`;
-                }
-              }
-            }
-
-            return result;
-          })
-        );
+        const [images, videos] = await Promise.all([
+          mapImages(prop.images),
+          mapVideos(prop.videos, { full: true }),
+        ]);
 
         return {
           ...prop,
@@ -1226,33 +1117,7 @@ const checkVideoStatus = async (req, res) => {
       });
     }
 
-    // 🔹 Rebuild videos with proxy + presigned URLs (same as getAdminProperties)
-    const videos = await Promise.all(
-      (property.videos || []).map(async (vid) => {
-        const result = {
-          ...vid,
-          masterProxyUrl: vid.masterKey
-            ? `/api/r2proxy/${vid.masterKey}`
-            : null,
-          thumbnail: vid.thumbnailKey
-            ? await getPresignedUrl(vid.thumbnailKey)
-            : null,
-          qualityUrls: {},
-          qualityProxyUrls: {},
-        };
-
-        if (vid.qualityKeys) {
-          for (const [quality, key] of Object.entries(vid.qualityKeys)) {
-            if (key) {
-              result.qualityUrls[quality] = await getPresignedUrl(key);
-              result.qualityProxyUrls[quality] = `/api/r2proxy/${key}`;
-            }
-          }
-        }
-
-        return result;
-      })
-    );
+    const videos = await mapVideos(property.videos, { full: true });
 
     res.status(200).json({
       success: true,
@@ -1285,18 +1150,16 @@ const checkVideoStatus = async (req, res) => {
 const getDeletedProperties = async (req, res) => {
     try {
       const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-      const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
+      const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
 
       const filter = { isDeleted: true };
       if (req.user.role !== "super_admin") {
         filter.$or = [{ createdBy: req.user._id }, { deletedBy: req.user._id }];
       }
-      const total = await Property.countDocuments(filter);
 
       if (req.query.search) {
-        const searchRegex = new RegExp(req.query.search, "i");
+        const searchRegex = new RegExp(escapeRegex(req.query.search), "i");
 
-        // Find users matching search
         const matchedUsers = await User.find({
           name: searchRegex,
         })
@@ -1305,49 +1168,42 @@ const getDeletedProperties = async (req, res) => {
 
         const matchedUserIds = matchedUsers.map((u) => u._id);
 
-        filter.$and = [
-          filter.$or ? filter : {}, // keep ownership filter
-          {
-            $or: [
-              { title: searchRegex },
-              { description: searchRegex },
-              { bedrooms: searchRegex },
-              { deletedBy: { $in: matchedUserIds } },
-            ],
-          },
-        ];
+        const searchClause = {
+          $or: [
+            { title: searchRegex },
+            { description: searchRegex },
+            { bedrooms: searchRegex },
+            { deletedBy: { $in: matchedUserIds } },
+          ],
+        };
+
+        if (filter.$or) {
+          filter.$and = [{ $or: filter.$or }, searchClause];
+          delete filter.$or;
+        } else {
+          Object.assign(filter, searchClause);
+        }
       }
 
-      // Fetch deleted properties
-      const properties = await Property.find(filter)
-        .skip((page - 1) * limit)
-        .limit(limit)
-        .populate("agent", "name email phone role")
-        .sort({ createdAt: -1 })
-        .populate("deletedBy", "name email phone role")
-        .populate("updatedBy", "name email phone role")
-        .populate("createdBy", "name email phone role")
-        .lean();
+      const [total, properties] = await Promise.all([
+        Property.countDocuments(filter),
+        Property.find(filter)
+          .skip((page - 1) * limit)
+          .limit(limit)
+          .populate("agent", "name email phone role")
+          .sort({ createdAt: -1 })
+          .populate("deletedBy", "name email phone role")
+          .populate("updatedBy", "name email phone role")
+          .populate("createdBy", "name email phone role")
+          .lean(),
+      ]);
 
-      // Add presigned URLs to images and videos for each property
       const propertiesWithPresignedUrls = await Promise.all(
         properties.map(async (property) => {
-          const images = await Promise.all(
-            (property.images || []).map(async (img) => ({
-              ...img,
-              presignUrl: img.key ? await getPresignedUrl(img.key) : null,
-            }))
-          );
-
-          const videos = await Promise.all(
-            (property.videos || []).map(async (vid) => ({
-              ...vid,
-              presignUrl: vid.key ? await getPresignedUrl(vid.key) : null,
-              thumbnail: vid.thumbnailKey
-                ? await getPresignedUrl(vid.thumbnailKey)
-                : null,
-            }))
-          );
+          const [images, videos] = await Promise.all([
+            mapImages(property.images, { limit: 1 }),
+            mapVideos(property.videos, { full: false }),
+          ]);
 
           return {
             ...property,
@@ -1396,11 +1252,14 @@ const deleteProperty = async (req, res) => {
       });
     }
 
-    // ✅ Soft Delete & Track Who Deleted
+    await purgePropertyMedia(property._id.toString());
+
     property.isDeleted = true;
-    property.deletedBy = req.user?._id || null; // Stores the admin who deleted
-    property.deletedAt = new Date(); // Save timestamp for audit
-    property.updatedBy = req.user?._id || property.updatedBy; // Optional: keep consistent audit trail
+    property.deletedBy = req.user?._id || null;
+    property.deletedAt = new Date();
+    property.updatedBy = req.user?._id || property.updatedBy;
+    property.images = [];
+    property.videos = [];
 
     await property.save();
 
@@ -1434,57 +1293,7 @@ const permanentDelete = async (req, res) => {
       });
     }
 
-    // 🖼️ Delete all images from R2
-    if (property.images?.length > 0) {
-      for (const image of property.images) {
-        if (image.key) {
-          try {
-            await deleteFile(image.key);
-            console.log(`🗑️ Deleted image: ${image.key}`);
-          } catch (error) {
-            console.error(
-              `⚠️ Failed to delete image ${image.key}:`,
-              error.message
-            );
-          }
-        }
-      }
-    }
-
-    // 🎬 Delete all videos (each entry may contain masterKey + thumbnail)
-    if (property.videos?.length > 0) {
-      for (const video of property.videos) {
-        try {
-          // Derive the propertyId from the key if available
-          let targetPropertyId = propertyId;
-          if (video.masterKey) {
-            const match = video.masterKey.match(/properties\/([^/]+)\//);
-            if (match && match[1]) {
-              targetPropertyId = match[1];
-            }
-          }
-
-          // Delete all .m3u8, .ts, and thumbnails under /videos/
-          await deleteVideoSet(targetPropertyId);
-          console.log(
-            `✅ Deleted all video files for property ${targetPropertyId}`
-          );
-
-          // If you want to be extra safe, delete the thumbnailKey separately (optional)
-          if (video.thumbnailKey) {
-            await deleteFile(video.thumbnailKey);
-            console.log(`🗑️ Deleted thumbnail: ${video.thumbnailKey}`);
-          }
-        } catch (error) {
-          console.error(
-            `❌ Failed to delete video set for property ${propertyId}:`,
-            error.message
-          );
-        }
-      }
-    }
-
-    // 🧹 Delete property from database
+    await purgePropertyMedia(propertyId);
     await Property.findByIdAndDelete(propertyId);
 
     res.status(200).json({
@@ -1496,6 +1305,652 @@ const permanentDelete = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to permanently delete property",
+      error: error.message,
+    });
+  }
+};
+
+const initiateChunkedVideoUpload = async (req, res) => {
+  try {
+    const propertyId = req.params.id;
+    const { fileName, contentType } = req.body || {};
+
+    if (!fileName) {
+      return res.status(400).json({
+        success: false,
+        message: "fileName is required",
+      });
+    }
+
+    const property = await Property.findById(propertyId);
+    if (!property) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Property not found" });
+    }
+
+    const hasInFlight = (property.videos || []).some((v) =>
+      ["uploading", "queued", "processing"].includes(v.videoStatus)
+    );
+    if (hasInFlight) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "A video is already uploading or processing. Wait or remove it first.",
+      });
+    }
+
+    if ((property.videos || []).some((v) => v.masterKey)) {
+      await purgePropertyVideos(propertyId);
+    }
+
+    const safeName = sanitizeFileName(fileName);
+    const key = `properties/${propertyId}/source/${Date.now()}-${safeName}`;
+    const { uploadId } = await createMultipartUpload(
+      key,
+      contentType || "video/mp4"
+    );
+
+    try {
+      await Property.findByIdAndUpdate(propertyId, {
+        videos: [{ videoStatus: "uploading" }],
+      });
+    } catch (err) {
+      await abortMultipartUpload({ uploadId, key }).catch(() => {});
+      throw err;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        uploadId,
+        key,
+        partSize: VIDEO_PART_SIZE,
+      },
+    });
+  } catch (error) {
+    console.error("Initiate chunked video error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to start video upload",
+    });
+  }
+};
+
+const uploadVideoChunk = async (req, res) => {
+  try {
+    const file = req.file;
+    const uploadId = req.body?.uploadId;
+    const key = req.body?.key;
+    const partNumber = parseInt(req.body?.partNumber, 10);
+
+    if (
+      !file?.buffer ||
+      !uploadId ||
+      !key ||
+      !Number.isInteger(partNumber) ||
+      partNumber < 1
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "chunk, uploadId, key and partNumber are required",
+      });
+    }
+
+    const result = await uploadPart({
+      key,
+      uploadId,
+      partNumber,
+      body: file.buffer,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        partNumber: result.partNumber,
+        etag: result.etag,
+      },
+    });
+  } catch (error) {
+    console.error("Upload video chunk error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to upload video chunk",
+    });
+  }
+};
+
+const completeChunkedVideoUpload = async (req, res) => {
+  try {
+    const propertyId = req.params.id;
+    const { uploadId, key, fileName, parts } = req.body || {};
+
+    if (!uploadId || !key || !Array.isArray(parts) || parts.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "uploadId, key and parts are required",
+      });
+    }
+
+    const property = await Property.findById(propertyId);
+    if (!property) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Property not found" });
+    }
+
+    await completeMultipartUpload({ uploadId, key, parts });
+
+    try {
+      await deleteVideoSet(propertyId, { exceptKeys: [key] });
+    } catch (err) {
+      console.error("Failed to clear previous video set:", err.message);
+    }
+
+    await Property.findByIdAndUpdate(propertyId, {
+      videos: [
+        {
+          videoStatus: "queued",
+          sourceKey: key,
+          originalName: fileName || path.basename(key),
+        },
+      ],
+    });
+
+    res.status(202).json({
+      success: true,
+      message: "Video upload started. Processing in background.",
+      status: "queued",
+    });
+
+    if (shouldProcessVideoInApi()) {
+      enqueueVideoUpload(() =>
+        runVideoWorker({
+          sourceKey: key,
+          originalName: fileName || path.basename(key),
+          propertyId,
+        })
+      );
+    }
+  } catch (error) {
+    console.error("Complete chunked video error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to complete video upload",
+    });
+  }
+};
+
+const abortChunkedVideoUpload = async (req, res) => {
+  try {
+    const { uploadId, key } = req.body || {};
+    if (!uploadId || !key) {
+      return res.status(400).json({
+        success: false,
+        message: "uploadId and key are required",
+      });
+    }
+    await abortMultipartUpload({ uploadId, key });
+    const property = await Property.findById(req.params.id);
+    if (property?.videos?.[0]?.videoStatus === "uploading") {
+      await Property.findByIdAndUpdate(req.params.id, { videos: [] });
+    }
+    res.status(200).json({ success: true });
+  } catch (error) {
+    console.error("Abort chunked video error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to abort video upload",
+    });
+  }
+};
+
+function getDateRangeOfISOWeek(week, year) {
+  const simple = new Date(year, 0, 1 + (week - 1) * 7);
+  const ISOWeekStart = new Date(simple);
+  if (simple.getDay() <= 4) {
+    ISOWeekStart.setDate(simple.getDate() - simple.getDay() + 1);
+  } else {
+    ISOWeekStart.setDate(simple.getDate() + 8 - simple.getDay());
+  }
+  const ISOWeekEnd = new Date(ISOWeekStart);
+  ISOWeekEnd.setDate(ISOWeekStart.getDate() + 6);
+  return { start: ISOWeekStart, end: ISOWeekEnd };
+}
+
+async function medianPrice(match) {
+  const count = await Property.countDocuments(match);
+  if (!count) return 0;
+  const skip = Math.floor((count - 1) / 2);
+  const take = count % 2 === 0 ? 2 : 1;
+  const docs = await Property.find(match)
+    .sort({ price: 1 })
+    .skip(skip)
+    .limit(take)
+    .select("price")
+    .lean();
+  if (!docs.length) return 0;
+  if (docs.length === 2) {
+    return Math.round((Number(docs[0].price) + Number(docs[1].price)) / 2);
+  }
+  return Math.round(Number(docs[0].price) || 0);
+}
+
+const getAdminStats = async (req, res) => {
+  try {
+    const range = req.query.range || "month";
+    const isSuper = req.user.role === "super_admin";
+    const scope = isSuper ? {} : { createdBy: req.user._id };
+    const activeMatch = { ...scope, isDeleted: false };
+    const now = new Date();
+    const ninetyDaysAgo = new Date(now);
+    ninetyDaysAgo.setDate(now.getDate() - 90);
+    const STUCK_VIDEO = [
+      "failed",
+      "error",
+      "queued",
+      "processing",
+      "uploading",
+    ];
+    const STATUS_ORDER = [
+      "For Rent",
+      "For Sale",
+      "Available",
+      "Under Contract",
+      "Rented",
+      "Sold",
+      "Occupied",
+    ];
+
+    const [
+      overviewAgg,
+      statusAgg,
+      typeAgg,
+      locationAgg,
+      bedroomAgg,
+      stuckVideos,
+      noPhotoCount,
+      medianRent,
+    ] = await Promise.all([
+      Property.aggregate([
+        { $match: scope },
+        {
+          $group: {
+            _id: null,
+            totalProperties: { $sum: 1 },
+            activeProperties: {
+              $sum: { $cond: [{ $eq: ["$isDeleted", false] }, 1, 0] },
+            },
+            deletedProperties: {
+              $sum: { $cond: [{ $eq: ["$isDeleted", true] }, 1, 0] },
+            },
+            forRent: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$isDeleted", false] },
+                      { $eq: ["$status", "For Rent"] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+            forSale: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$isDeleted", false] },
+                      { $eq: ["$status", "For Sale"] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      ]),
+      Property.aggregate([
+        { $match: activeMatch },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+      Property.aggregate([
+        { $match: activeMatch },
+        { $group: { _id: "$propertyType", count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+      ]),
+      Property.aggregate([
+        { $match: activeMatch },
+        {
+          $group: {
+            _id: {
+              $let: {
+                vars: {
+                  loc: { $trim: { input: { $ifNull: ["$location", ""] } } },
+                },
+                in: {
+                  $cond: [{ $eq: ["$$loc", ""] }, "Unknown", "$$loc"],
+                },
+              },
+            },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { count: -1 } },
+        { $limit: 8 },
+      ]),
+      Property.aggregate([
+        { $match: activeMatch },
+        {
+          $group: {
+            _id: { $ifNull: ["$bedrooms", 0] },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+      Property.countDocuments({
+        ...activeMatch,
+        "videos.videoStatus": { $in: STUCK_VIDEO },
+      }),
+      Property.countDocuments({
+        ...activeMatch,
+        $or: [{ images: { $exists: false } }, { images: { $size: 0 } }],
+      }),
+      medianPrice({ ...activeMatch, status: "For Rent" }),
+    ]);
+
+    const overview = overviewAgg[0] || {
+      totalProperties: 0,
+      activeProperties: 0,
+      deletedProperties: 0,
+      forRent: 0,
+      forSale: 0,
+    };
+    const activeCount = overview.activeProperties || 0;
+    const pct = (count) =>
+      activeCount ? Number(((count / activeCount) * 100).toFixed(1)) : 0;
+
+    const statusMap = new Map(
+      statusAgg.map((s) => [s._id || "Unknown", s.count])
+    );
+    const statusDistribution = [
+      ...STATUS_ORDER.filter((status) => statusMap.has(status)).map(
+        (status) => ({
+          status,
+          count: statusMap.get(status),
+          percentage: pct(statusMap.get(status)),
+        })
+      ),
+      ...[...statusMap.keys()]
+        .filter((status) => !STATUS_ORDER.includes(status))
+        .map((status) => ({
+          status,
+          count: statusMap.get(status),
+          percentage: pct(statusMap.get(status)),
+        })),
+    ];
+
+    const propertyTypeDistribution = typeAgg.map((p) => ({
+      type: p._id || "Unknown",
+      count: p.count,
+      percentage: pct(p.count),
+    }));
+
+    const locationDistribution = locationAgg.map((l) => ({
+      location: l._id,
+      count: l.count,
+    }));
+
+    const bedroomDistribution = bedroomAgg.map((b) => ({
+      bedrooms: b._id === 0 ? "Studio" : `${b._id} BHK`,
+      count: b.count,
+    }));
+
+    let match = { ...scope };
+    if (range === "week") {
+      const last12Weeks = new Date();
+      last12Weeks.setDate(now.getDate() - 7 * 12);
+      match.createdAt = { $gte: last12Weeks };
+    } else if (range === "month") {
+      const last12Months = new Date();
+      last12Months.setMonth(now.getMonth() - 12);
+      match.createdAt = { $gte: last12Months };
+    } else {
+      const last5Years = new Date();
+      last5Years.setFullYear(now.getFullYear() - 5);
+      match.createdAt = { $gte: last5Years };
+    }
+
+    let groupId;
+    if (range === "week") {
+      groupId = {
+        year: { $year: "$createdAt" },
+        week: { $isoWeek: "$createdAt" },
+      };
+    } else if (range === "month") {
+      groupId = {
+        year: { $year: "$createdAt" },
+        month: { $month: "$createdAt" },
+      };
+    } else {
+      groupId = { year: { $year: "$createdAt" } };
+    }
+
+    const creationRaw = await Property.aggregate([
+      { $match: match },
+      { $group: { _id: groupId, count: { $sum: 1 } } },
+      { $sort: { "_id.year": 1, "_id.month": 1, "_id.week": 1 } },
+    ]);
+
+    const creationStats = creationRaw.map((item) => {
+      if (item._id.week) {
+        const { start, end } = getDateRangeOfISOWeek(
+          item._id.week,
+          item._id.year
+        );
+        const label = `${start.toLocaleString("en-US", {
+          month: "short",
+        })} ${start.getDate()} – ${end.toLocaleString("en-US", {
+          month: "short",
+        })} ${end.getDate()}, ${item._id.year}`;
+        return { label, count: item.count };
+      }
+      if (item._id.month) {
+        const monthName = new Date(
+          item._id.year,
+          item._id.month - 1,
+          1
+        ).toLocaleString("en-US", { month: "short" });
+        return { label: `${monthName} ${item._id.year}`, count: item.count };
+      }
+      return { label: `${item._id.year}`, count: item.count };
+    });
+
+    const [noPhotoDocs, badVideoDocs, oldListingDocs] = await Promise.all([
+      Property.find({
+        ...activeMatch,
+        $or: [{ images: { $exists: false } }, { images: { $size: 0 } }],
+      })
+        .select("title location slug createdAt")
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .lean(),
+      Property.find({
+        ...activeMatch,
+        "videos.videoStatus": { $in: STUCK_VIDEO },
+      })
+        .select("title location slug videos.videoStatus")
+        .limit(10)
+        .lean(),
+      Property.find({
+        ...activeMatch,
+        status: { $in: ["For Rent", "For Sale", "Available"] },
+        createdAt: { $lt: ninetyDaysAgo },
+      })
+        .select("title location slug status createdAt")
+        .sort({ createdAt: 1 })
+        .limit(10)
+        .lean(),
+    ]);
+
+    const attentionMap = new Map();
+    const addAttention = (doc, reason) => {
+      const id = String(doc._id);
+      const existing = attentionMap.get(id);
+      if (existing) {
+        if (!existing.reasons.includes(reason)) existing.reasons.push(reason);
+        return;
+      }
+      attentionMap.set(id, {
+        _id: id,
+        title: doc.title,
+        location: doc.location || "",
+        slug: doc.slug,
+        reasons: [reason],
+      });
+    };
+
+    noPhotoDocs.forEach((doc) => addAttention(doc, "No photos"));
+    badVideoDocs.forEach((doc) => {
+      const vs = doc.videos?.[0]?.videoStatus;
+      const label =
+        vs === "failed" || vs === "error"
+          ? "Video failed"
+          : vs
+            ? `Video ${vs}`
+            : "Video stuck";
+      addAttention(doc, label);
+    });
+    oldListingDocs.forEach((doc) => {
+      const days = Math.max(
+        90,
+        Math.floor((now - new Date(doc.createdAt)) / 86400000)
+      );
+      addAttention(doc, `Listed ${days}+ days`);
+    });
+    const attention = [...attentionMap.values()].slice(0, 15);
+
+    let adminPerformance = [];
+    let wishlistTop = [];
+    if (isSuper) {
+      [adminPerformance, wishlistTop] = await Promise.all([
+        Property.aggregate([
+          {
+            $group: {
+              _id: "$createdBy",
+              created: { $sum: 1 },
+              active: {
+                $sum: { $cond: [{ $eq: ["$isDeleted", false] }, 1, 0] },
+              },
+              forRent: {
+                $sum: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $eq: ["$isDeleted", false] },
+                        { $eq: ["$status", "For Rent"] },
+                      ],
+                    },
+                    1,
+                    0,
+                  ],
+                },
+              },
+              forSale: {
+                $sum: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $eq: ["$isDeleted", false] },
+                        { $eq: ["$status", "For Sale"] },
+                      ],
+                    },
+                    1,
+                    0,
+                  ],
+                },
+              },
+            },
+          },
+          {
+            $lookup: {
+              from: "users",
+              localField: "_id",
+              foreignField: "_id",
+              as: "user",
+            },
+          },
+          { $unwind: { path: "$user", preserveNullAndEmptyArrays: true } },
+          {
+            $project: {
+              name: { $ifNull: ["$user.name", "Unknown"] },
+              email: { $ifNull: ["$user.email", ""] },
+              created: 1,
+              active: 1,
+              forRent: 1,
+              forSale: 1,
+            },
+          },
+          { $sort: { active: -1 } },
+        ]),
+        User.aggregate([
+          { $unwind: "$wishlist" },
+          { $group: { _id: "$wishlist", saves: { $sum: 1 } } },
+          { $sort: { saves: -1 } },
+          { $limit: 8 },
+          {
+            $lookup: {
+              from: "properties",
+              localField: "_id",
+              foreignField: "_id",
+              as: "property",
+            },
+          },
+          { $unwind: "$property" },
+          { $match: { "property.isDeleted": false } },
+          {
+            $project: {
+              title: "$property.title",
+              location: "$property.location",
+              slug: "$property.slug",
+              saves: 1,
+            },
+          },
+        ]),
+      ]);
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        role: req.user.role,
+        overview: {
+          ...overview,
+          medianRent,
+          stuckVideos,
+          listingsWithoutPhotos: noPhotoCount,
+        },
+        propertyTypeDistribution,
+        statusDistribution,
+        locationDistribution,
+        bedroomDistribution,
+        creationStats,
+        attention,
+        adminPerformance,
+        wishlistTop,
+      },
+    });
+  } catch (error) {
+    console.error("Failed to get stats:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to get stats",
       error: error.message,
     });
   }
@@ -1515,5 +1970,11 @@ module.exports = {
   safeDeleteSync,
   checkVideoStatus,
   upload,
-  getPropertyBySlug
+  chunkUpload,
+  getPropertyBySlug,
+  initiateChunkedVideoUpload,
+  uploadVideoChunk,
+  completeChunkedVideoUpload,
+  abortChunkedVideoUpload,
+  getAdminStats,
 };

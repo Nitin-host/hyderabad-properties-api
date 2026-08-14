@@ -1,21 +1,22 @@
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const mongoose = require('mongoose');
 const { validationResult } = require('express-validator');
 const crypto = require('crypto');
 const { sendConfirmationEmail, sendOfficialCredentialsEmail, sendOtpEmail, sendNewUserDetailsToSuperAdmin, sendForgotPasswordOtpEmail } = require('../services/emailService');
+const { mapImages } = require("../services/mediaUrls");
 
 // Generate JWT Token
 const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRE,
+    expiresIn: process.env.JWT_EXPIRE || "15m",
   });
 };
 
-// Generate Refresh Token
 const generateRefreshToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET + '_refresh', {
-    expiresIn: '7d',
+  return jwt.sign({ id }, process.env.JWT_SECRET + "_refresh", {
+    expiresIn: process.env.JWT_REFRESH_EXPIRE || "30d",
   });
 };
 
@@ -236,13 +237,15 @@ exports.refreshToken = async (req, res) => {
     }
 
     // Verify refresh token
-    const decoded = jwt.verify(refreshToken, process.env.JWT_SECRET + '_refresh');
-    const user = await User.findById(decoded.id);
+    const decoded = jwt.verify(refreshToken, process.env.JWT_SECRET + "_refresh");
+    const user = await User.findById(decoded.id).select(
+      "_id name email role isActive"
+    );
 
-    if (!user) {
+    if (!user || user.isActive === false) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid refresh token'
+        message: "Invalid refresh token",
       });
     }
 
@@ -715,29 +718,55 @@ exports.changePassword = async (req, res) => {
 //Get property to wishlist
 exports.getWishlist = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).populate("wishlist");
+    const user = await User.findById(req.user._id)
+      .select("wishlist")
+      .populate({
+        path: "wishlist",
+        match: { isDeleted: false },
+        select:
+          "title price location landmarks bedrooms bathrooms size sizeUnit parking amenities status images slug furnished propertyType createdAt",
+        options: { limit: 100 },
+      })
+      .lean();
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    res.json(user.wishlist || []);
+    const wishlist = await Promise.all(
+      (user.wishlist || []).map(async (property) => {
+        if (!property) return null;
+        const images = await mapImages(property.images, { limit: 1 });
+        return { ...property, images, videos: [] };
+      })
+    );
+
+    res.json(wishlist.filter(Boolean));
   } catch (error) {
-    res.status(500).json({ message: "Error fetching wishlist", error });
+    console.error("Error fetching wishlist:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching wishlist",
+    });
   }
 };
 
 // Add property to wishlist
 exports.addToWishlist = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ message: "User not found" });
-
-    const propertyId = req.params.id; // ✅ Use URL param
-    if (!user.wishlist.includes(propertyId)) {
-      user.wishlist.push(propertyId);
-      await user.save();
+    const propertyId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(propertyId)) {
+      return res.status(400).json({ success: false, message: "Invalid property id" });
     }
+
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { $addToSet: { wishlist: propertyId } },
+      { new: true }
+    ).select("wishlist");
+
+    if (!user) return res.status(404).json({ message: "User not found" });
 
     res.json({ success: true, wishlist: user.wishlist });
   } catch (error) {
+    console.error("Add to wishlist error:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -745,17 +774,22 @@ exports.addToWishlist = async (req, res) => {
 // Remove property from wishlist
 exports.removeFromWishlist = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ message: "User not found" });
-
     const propertyId = req.params.id;
-    user.wishlist = user.wishlist.filter(
-      (id) => id && id.toString() !== propertyId
-    );
-    await user.save();
+    if (!mongoose.Types.ObjectId.isValid(propertyId)) {
+      return res.status(400).json({ success: false, message: "Invalid property id" });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { $pull: { wishlist: propertyId } },
+      { new: true }
+    ).select("wishlist");
+
+    if (!user) return res.status(404).json({ message: "User not found" });
 
     res.json({ success: true, wishlist: user.wishlist });
   } catch (error) {
+    console.error("Remove from wishlist error:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

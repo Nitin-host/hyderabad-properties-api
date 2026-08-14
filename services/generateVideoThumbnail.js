@@ -41,8 +41,6 @@ async function generateVideoThumbnail(videoPath, options = {}) {
   await runFfmpeg2(
     [
       "-y",
-      "-loglevel",
-      "error",
       "-i",
       safeInput,
       "-ss",

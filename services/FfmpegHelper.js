@@ -7,8 +7,9 @@ const fsPromises = fs.promises;
 const path = require("path");
 
 // 🧩 Use ffmpeg-static to avoid chmod permission issues
-const FFMPEG_PATH = require("ffmpeg-static");
-const { path: FFPROBE_PATH } = require("@ffprobe-installer/ffprobe");
+const FFMPEG_PATH = process.env.FFMPEG_PATH || require("ffmpeg-static");
+const FFPROBE_PATH =
+  process.env.FFPROBE_PATH || require("@ffprobe-installer/ffprobe").path;
 
 // ✅ Log helper (enable with DEBUG_FFMPEG=true)
 const DEBUG = process.env.DEBUG_FFMPEG === "true";
