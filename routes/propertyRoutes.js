@@ -9,11 +9,17 @@ const {
   uploadPropertyImages,
   uploadPropertyVideos,
   upload,
+  chunkUpload,
   getAdminProperties,
   getDeletedProperties,
   permanentDelete,
   checkVideoStatus,
   getPropertyBySlug,
+  initiateChunkedVideoUpload,
+  uploadVideoChunk,
+  completeChunkedVideoUpload,
+  abortChunkedVideoUpload,
+  getAdminStats,
 } = require('../controllers/propertyController');
 const {
   validateCreateProperty,
@@ -54,7 +60,20 @@ router.post('/', protect, authorize('admin', 'super_admin'), parseJsonFieldsMidd
 // Image Upload route
 router.post('/:id/images', protect, authorize('admin', 'super_admin'), validatePropertyId, upload.array('images', 20), uploadPropertyImages);
 
-// Video Upload route
+// Chunked video upload (Railway-safe: small parts, source stored on R2)
+router.post('/:id/video/initiate', protect, authorize('admin', 'super_admin'), validatePropertyId, initiateChunkedVideoUpload);
+router.put(
+  '/:id/video/part',
+  protect,
+  authorize('admin', 'super_admin'),
+  validatePropertyId,
+  chunkUpload.single('chunk'),
+  uploadVideoChunk
+);
+router.post('/:id/video/complete', protect, authorize('admin', 'super_admin'), validatePropertyId, completeChunkedVideoUpload);
+router.post('/:id/video/abort', protect, authorize('admin', 'super_admin'), validatePropertyId, abortChunkedVideoUpload);
+
+// Legacy single-request video upload
 router.post('/:id/video', protect, authorize('admin', 'super_admin'), validatePropertyId, upload.fields([{ name: 'videos', maxCount: 1 }]), uploadPropertyVideos);
 
 //video status route
@@ -115,7 +134,11 @@ router.put(
       // Restore property in one step
       const property = await Property.findByIdAndUpdate(
         req.params.id,
-        { isDeleted: false },
+        {
+          isDeleted: false,
+          deletedBy: null,
+          deletedAt: null,
+        },
         { new: true, runValidators: true }
       ).populate("agent", "name email phone");
 
@@ -160,176 +183,7 @@ router.get(
   "/admin/stats",
   protect,
   authorize("admin", "super_admin"),
-  async (req, res) => {
-    try {
-      const Property = require("../models/Property");
-      const range = req.query.range || "month";
-      const now = new Date();
-
-      // ✅ Function to get date range of ISO week
-      function getDateRangeOfISOWeek(week, year) {
-        const simple = new Date(year, 0, 1 + (week - 1) * 7);
-        const ISOWeekStart = new Date(simple);
-        if (simple.getDay() <= 4) {
-          ISOWeekStart.setDate(simple.getDate() - simple.getDay() + 1);
-        } else {
-          ISOWeekStart.setDate(simple.getDate() + 8 - simple.getDay());
-        }
-        const ISOWeekEnd = new Date(ISOWeekStart);
-        ISOWeekEnd.setDate(ISOWeekStart.getDate() + 6);
-        return { start: ISOWeekStart, end: ISOWeekEnd };
-      }
-
-      // 1️⃣ Overview aggregation
-      const overviewAgg = await Property.aggregate([
-        {
-          $group: {
-            _id: null,
-            totalProperties: { $sum: 1 },
-            activeProperties: {
-              $sum: { $cond: [{ $eq: ["$isDeleted", false] }, 1, 0] },
-            },
-            deletedProperties: {
-              $sum: { $cond: [{ $eq: ["$isDeleted", true] }, 1, 0] },
-            },
-            averagePrice: { $avg: "$price" },
-            totalImagesUploaded: { $sum: { $size: "$images" } },
-            totalVideosUploaded: { $sum: { $size: "$videos" } },
-          },
-        },
-      ]);
-
-      const overview = overviewAgg[0] || {};
-      const totalProperties = overview.totalProperties || 0;
-
-      // 2️⃣ Dynamic type distribution
-      const propertyTypeAgg = await Property.aggregate([
-        { $match: { isDeleted: false } },
-        { $group: { _id: "$propertyType", count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-      ]);
-
-      const propertyTypeDistribution = propertyTypeAgg.map((p) => ({
-        type: p._id,
-        count: p.count,
-        percentage: totalProperties
-          ? ((p.count / totalProperties) * 100).toFixed(1)
-          : 0,
-      }));
-
-      // 3️⃣ Dynamic status distribution
-      const statusAgg = await Property.aggregate([
-        { $match: { isDeleted: false } },
-        {
-          $group: {
-            _id: { $toLower: "$status" },
-            originalStatuses: { $addToSet: "$status" },
-            count: { $sum: 1 },
-          },
-        },
-      ]);
-
-      let statusStats = statusAgg.map((s) => ({
-        status: s.originalStatuses[0],
-        count: s.count,
-        percentage: totalProperties
-          ? ((s.count / totalProperties) * 100).toFixed(1)
-          : 0,
-      }));
-
-      if (overview.deletedProperties > 0) {
-        statusStats.push({
-          status: "Deleted",
-          count: overview.deletedProperties,
-          percentage: totalProperties
-            ? ((overview.deletedProperties / totalProperties) * 100).toFixed(1)
-            : 0,
-        });
-      }
-
-      // 4️⃣ Time range filter logic
-      let match = {};
-      if (range === "week") {
-        const last12Weeks = new Date();
-        last12Weeks.setDate(now.getDate() - 7 * 12);
-        match.createdAt = { $gte: last12Weeks };
-      } else if (range === "month") {
-        const last12Months = new Date();
-        last12Months.setMonth(now.getMonth() - 12);
-        match.createdAt = { $gte: last12Months };
-      } else {
-        const last5Years = new Date();
-        last5Years.setFullYear(now.getFullYear() - 5);
-        match.createdAt = { $gte: last5Years };
-      }
-
-      // Group logic
-      let groupId;
-      if (range === "week")
-        groupId = {
-          year: { $year: "$createdAt" },
-          week: { $isoWeek: "$createdAt" },
-        };
-      else if (range === "month")
-        groupId = {
-          year: { $year: "$createdAt" },
-          month: { $month: "$createdAt" },
-        };
-      else groupId = { year: { $year: "$createdAt" } };
-
-      // 5️⃣ Aggregation
-      let creationStats = await Property.aggregate([
-        { $match: match },
-        { $group: { _id: groupId, count: { $sum: 1 } } },
-        { $sort: { "_id.year": 1, "_id.month": 1, "_id.week": 1 } },
-      ]);
-
-      // ✅ Format stats with pretty labels
-      const formattedCreationStats = creationStats.map((item) => {
-        if (item._id.week) {
-          const { start, end } = getDateRangeOfISOWeek(
-            item._id.week,
-            item._id.year
-          );
-          const label = `${start.toLocaleString("en-US", {
-            month: "short",
-          })} ${start.getDate()} - ${end.toLocaleString("en-US", {
-            month: "short",
-          })} ${end.getDate()}, ${item._id.year}`;
-          return { ...item, label };
-        }
-
-        if (item._id.month) {
-          const monthName = new Date(
-            item._id.year,
-            item._id.month - 1,
-            1
-          ).toLocaleString("en-US", { month: "short" });
-          return { ...item, label: `${monthName} ${item._id.year}` };
-        }
-
-        return { ...item, label: `${item._id.year}` };
-      });
-
-      // ✅ Return response
-      res.status(200).json({
-        success: true,
-        data: {
-          overview,
-          propertyTypeDistribution,
-          statusDistribution: statusStats,
-          creationStats: formattedCreationStats,
-        },
-      });
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({
-        success: false,
-        message: "Failed to get stats",
-        error: error.message,
-      });
-    }
-  }
+  getAdminStats
 );
 
 module.exports = router;

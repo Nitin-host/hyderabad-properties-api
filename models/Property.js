@@ -168,6 +168,7 @@
           videoStatus: {
             type: String,
             enum: [
+              "uploading",
               "queued",
               "processing",
               "completed",
@@ -177,6 +178,8 @@
             ],
             default: "queued",
           },
+          sourceKey: { type: String },
+          originalName: { type: String },
           errorMessage: { type: String, default: "" },
         },
       ],
@@ -231,6 +234,10 @@
   PropertySchema.index({ furnished: 1 });
   PropertySchema.index({ isDeleted: 1 });
   PropertySchema.index({ createdAt: -1 });
+  PropertySchema.index({ isDeleted: 1, createdAt: -1 });
+  PropertySchema.index({ createdBy: 1, isDeleted: 1, createdAt: -1 });
+  PropertySchema.index({ size: 1 });
+  PropertySchema.index({ "videos.videoStatus": 1, isDeleted: 1 });
 
   PropertySchema.pre("save", async function () {
     this.updatedAt = Date.now();

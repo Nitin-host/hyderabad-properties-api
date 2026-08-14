@@ -1,3 +1,5 @@
+const fs = require("fs");
+const { pipeline } = require("stream/promises");
 const {
   S3Client,
   PutObjectCommand,
@@ -5,6 +7,10 @@ const {
   ListObjectsV2Command,
   DeleteObjectsCommand,
   DeleteObjectCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand,
 } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 require("dotenv").config();
@@ -73,15 +79,12 @@ async function getPresignedUrl(key, expiresIn = 604800) {
   const command = new GetObjectCommand({
     Bucket: R2_BUCKET,
     Key: key,
-    ResponseCacheControl: "no-cache",
+    ResponseCacheControl: key.endsWith(".m3u8")
+      ? "public, max-age=30"
+      : "public, max-age=86400",
     ResponseContentType: key.endsWith(".m3u8")
       ? "application/x-mpegURL"
       : undefined,
-    ResponseHeaderOverrides: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-      "Access-Control-Allow-Headers": "*",
-    },
   });
 
   const url = await getSignedUrl(r2, command, { expiresIn });
@@ -94,6 +97,15 @@ async function getPresignedUrl(key, expiresIn = 604800) {
   return url;
 }
 
+async function getObject(key, { range } = {}) {
+  const command = new GetObjectCommand({
+    Bucket: R2_BUCKET,
+    Key: key,
+    ...(range ? { Range: range } : {}),
+  });
+  return r2.send(command);
+}
+
 // -----------------------------------------------------
 // Delete a Single Object from R2
 // -----------------------------------------------------
@@ -104,18 +116,15 @@ async function deleteFile(key) {
   return true;
 }
 
-// -----------------------------------------------------
-// Delete Entire HLS Video Set (m3u8 + ts + thumbnails)
-// -----------------------------------------------------
-async function deleteVideoSet(propertyId, options = { dryRun: false }) {
-  const prefix = `properties/${propertyId}/videos/`;
+async function deletePrefix(prefix, options = {}) {
+  const dryRun = !!options.dryRun;
+  const except = new Set((options.exceptKeys || []).filter(Boolean));
   let deletedCount = 0;
   let continuationToken = undefined;
 
   try {
     console.log(`🧹 Starting deletion for: ${prefix}`);
-    if (options.dryRun)
-      console.log("⚙️ DRY RUN MODE — no files will be deleted.");
+    if (dryRun) console.log("⚙️ DRY RUN MODE — no files will be deleted.");
 
     do {
       const listCmd = new ListObjectsV2Command({
@@ -132,11 +141,20 @@ async function deleteVideoSet(propertyId, options = { dryRun: false }) {
         break;
       }
 
-      const keys = listed.Contents.map((obj) => obj.Key);
-      console.log(`🧾 Found ${keys.length} files:`);
-      keys.forEach((k) => console.log("   •", k));
+      const keys = listed.Contents.map((obj) => obj.Key).filter(
+        (key) => key && !except.has(key)
+      );
 
-      if (!options.dryRun) {
+      if (keys.length === 0) {
+        continuationToken = listed.IsTruncated
+          ? listed.NextContinuationToken
+          : undefined;
+        continue;
+      }
+
+      console.log(`🧾 Found ${keys.length} files under ${prefix}`);
+
+      if (!dryRun) {
         const deleteCmd = new DeleteObjectsCommand({
           Bucket: R2_BUCKET,
           Delete: {
@@ -146,7 +164,6 @@ async function deleteVideoSet(propertyId, options = { dryRun: false }) {
         });
         await r2.send(deleteCmd);
 
-        // Remove from URL cache
         for (const key of keys) {
           urlCache.delete(key);
         }
@@ -159,26 +176,44 @@ async function deleteVideoSet(propertyId, options = { dryRun: false }) {
         : undefined;
     } while (continuationToken);
 
-    if (options.dryRun) {
+    if (dryRun) {
       console.log(
         `🧪 DRY RUN COMPLETE — ${deletedCount} files listed, none deleted.`
       );
     } else if (deletedCount > 0) {
-      console.log(
-        `✅ Deleted ${deletedCount} files (m3u8 + ts + thumbnails) for ${propertyId}`
-      );
-    } else {
-      console.log(`ℹ️ No video files found for property ${propertyId}`);
+      console.log(`✅ Deleted ${deletedCount} files for ${prefix}`);
     }
 
-    return { deleted: deletedCount, dryRun: !!options.dryRun };
+    return { deleted: deletedCount, dryRun };
   } catch (err) {
-    console.error(
-      `❌ Failed to delete video set for ${propertyId}:`,
-      err.message
-    );
+    console.error(`❌ Failed to delete prefix ${prefix}:`, err.message);
     throw err;
   }
+}
+
+async function deletePrefixes(prefixes, options = {}) {
+  let deleted = 0;
+  for (const prefix of prefixes) {
+    const result = await deletePrefix(prefix, options);
+    deleted += result.deleted;
+  }
+  return { deleted, dryRun: !!options.dryRun };
+}
+
+// HLS + source uploads for a property
+async function deleteVideoSet(propertyId, options = {}) {
+  return deletePrefixes(
+    [
+      `properties/${propertyId}/videos/`,
+      `properties/${propertyId}/source/`,
+    ],
+    options
+  );
+}
+
+// Images + HLS + source (and any leftover objects under the property)
+async function deletePropertyMedia(propertyId, options = {}) {
+  return deletePrefix(`properties/${propertyId}/`, options);
 }
 
 // -----------------------------------------------------
@@ -196,10 +231,81 @@ setInterval(() => {
 // -----------------------------------------------------
 // Exports
 // -----------------------------------------------------
+async function createMultipartUpload(key, contentType) {
+  const command = new CreateMultipartUploadCommand({
+    Bucket: R2_BUCKET,
+    Key: key,
+    ContentType: contentType || "video/mp4",
+  });
+  const result = await r2.send(command);
+  return { uploadId: result.UploadId, key };
+}
+
+async function uploadPart({ key, uploadId, partNumber, body }) {
+  const command = new UploadPartCommand({
+    Bucket: R2_BUCKET,
+    Key: key,
+    UploadId: uploadId,
+    PartNumber: partNumber,
+    Body: body,
+  });
+  const result = await r2.send(command);
+  return { etag: result.ETag, partNumber };
+}
+
+async function completeMultipartUpload({ key, uploadId, parts }) {
+  const command = new CompleteMultipartUploadCommand({
+    Bucket: R2_BUCKET,
+    Key: key,
+    UploadId: uploadId,
+    MultipartUpload: {
+      Parts: parts
+        .map((p) => {
+          let etag = p.ETag || p.etag;
+          if (etag && !String(etag).startsWith('"')) {
+            etag = `"${etag}"`;
+          }
+          return {
+            ETag: etag,
+            PartNumber: Number(p.PartNumber || p.partNumber),
+          };
+        })
+        .sort((a, b) => a.PartNumber - b.PartNumber),
+    },
+  });
+  await r2.send(command);
+  return { key };
+}
+
+async function abortMultipartUpload({ key, uploadId }) {
+  const command = new AbortMultipartUploadCommand({
+    Bucket: R2_BUCKET,
+    Key: key,
+    UploadId: uploadId,
+  });
+  await r2.send(command);
+  return true;
+}
+
+async function downloadObjectToFile(key, destPath) {
+  const command = new GetObjectCommand({ Bucket: R2_BUCKET, Key: key });
+  const result = await r2.send(command);
+  await pipeline(result.Body, fs.createWriteStream(destPath));
+  return destPath;
+}
+
 module.exports = {
   uploadStream,
   uploadBuffer,
   getPresignedUrl,
+  getObject,
   deleteFile,
+  deletePrefix,
   deleteVideoSet,
+  deletePropertyMedia,
+  createMultipartUpload,
+  uploadPart,
+  completeMultipartUpload,
+  abortMultipartUpload,
+  downloadObjectToFile,
 };

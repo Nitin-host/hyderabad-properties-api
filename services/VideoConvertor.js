@@ -59,7 +59,7 @@ async function convertToMp4(filePath, originalName, options = {}) {
         "+faststart",
         safeOutput,
       ],
-      { timeoutMs: 3 * 60 * 1000 }
+      { timeoutMs: 15 * 60 * 1000 }
     );
 
     if (deleteOriginal) safeDeleteSync(filePath);
@@ -94,7 +94,7 @@ async function convertToMp4(filePath, originalName, options = {}) {
       "+faststart",
       safeOutput,
     ],
-    { timeoutMs: 10 * 60 * 1000 }
+    { timeoutMs: 45 * 60 * 1000 }
   );
 
   if (deleteOriginal) safeDeleteSync(filePath);

@@ -1,0 +1,41 @@
+# Video-only job image.
+# Takes uploaded source from R2, encodes 480p / 720p / 1080p HLS,
+# uploads results back to R2. Does not run the API.
+#
+# Base: official node:20-alpine + Alpine ffmpeg (supported packages).
+# Memory: 2 GB recommended. One job at a time.
+
+FROM node:20-alpine AS deps
+RUN apk add --no-cache python3 make g++
+WORKDIR /usr/src/app
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+FROM node:20-alpine
+WORKDIR /usr/src/app
+
+RUN apk add --no-cache ffmpeg
+
+COPY --from=deps /usr/src/app/node_modules ./node_modules
+COPY package*.json ./
+COPY workers ./workers
+COPY services/r2Service.js ./services/r2Service.js
+COPY services/FfmpegHelper.js ./services/FfmpegHelper.js
+COPY services/VideoConvertor.js ./services/VideoConvertor.js
+COPY services/generateVideoThumbnail.js ./services/generateVideoThumbnail.js
+COPY models/Property.js ./models/Property.js
+
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup \
+  && mkdir -p /tmp && chown -R appuser:appgroup /usr/src/app /tmp
+USER appuser
+
+ENV NODE_ENV=production
+ENV NODE_OPTIONS=--max-old-space-size=384
+ENV FFMPEG_PATH=/usr/bin/ffmpeg
+ENV FFPROBE_PATH=/usr/bin/ffprobe
+ENV VIDEO_WORKER_PORT=5100
+ENV CONVERTED_VIDEOS_DIR=/tmp/converted-videos
+ENV THUMBNAIL_DIR=/tmp/video-thumbnails
+
+EXPOSE 5100
+CMD ["node", "workers/videoProcessor.js"]

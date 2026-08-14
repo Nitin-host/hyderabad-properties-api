@@ -1,42 +1,28 @@
-# Stage 1: Build dependencies
+# API image — does not encode video. Pair with Dockerfile.worker on Railway.
 FROM node:20-alpine AS deps
 
-# Install build tools for native modules (needed by ffmpeg wrappers, mongoose, etc.)
-RUN apk add --no-cache \
-    python3 \
-    make \
-    g++ \
-    ffmpeg \
-    bash
+RUN apk add --no-cache python3 make g++
 
 WORKDIR /usr/src/app
 
-# Copy only package files to leverage Docker cache
 COPY package*.json ./
+RUN npm ci --omit=dev
 
-# Install production dependencies only
-RUN npm ci --only=production
-
-# Stage 2: Final runtime
 FROM node:20-alpine
-
 WORKDIR /usr/src/app
 
-# Install ffmpeg & ffprobe for fluent-ffmpeg
-RUN apk add --no-cache ffmpeg bash
+RUN apk add --no-cache ffmpeg
 
-# Copy production node_modules from deps stage
 COPY --from=deps /usr/src/app/node_modules ./node_modules
-
-# Copy rest of the app
 COPY . .
 
-# Create a non-root user for security
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
 
-# Expose your API port
-EXPOSE 5000
+ENV NODE_ENV=production
+ENV FFMPEG_PATH=/usr/bin/ffmpeg
+ENV FFPROBE_PATH=/usr/bin/ffprobe
+ENV VIDEO_PROCESS_IN_API=false
 
-# Start your backend
+EXPOSE 5000
 CMD ["node", "server.js"]

@@ -30,15 +30,19 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // CORS setup
 const allowedOrigins = [
-  process.env.CLIENT_URL, // e.g. https://my-frontend.onrender.com
-  "http://localhost:5173", // local dev
-];
+  process.env.CLIENT_URL,
+  process.env.FRONTEND_URL,
+  "http://localhost:5173",
+  "http://localhost:4173",
+]
+  .filter(Boolean)
+  .map((origin) => origin.replace(/\/$/, ""));
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin) return callback(null, true); // allow Postman or curl
-      if (allowedOrigins.includes(origin)) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin.replace(/\/$/, ""))) {
         return callback(null, true);
       }
       return callback(new Error("Not allowed by CORS"));
@@ -47,10 +51,14 @@ app.use(
   })
 );
 
-// Connect to MongoDB
 const connectDB = async () => {
   try {
-    const conn = await mongoose.connect(process.env.MONGO_URI);
+    const uri = String(process.env.MONGO_URI || "");
+    const isLocal = /localhost|127\.0\.0\.1/.test(uri);
+    const conn = await mongoose.connect(
+      uri.replace(/mongodb:\/\/localhost\b/i, "mongodb://127.0.0.1"),
+      isLocal ? { family: 4 } : {}
+    );
     console.log(`MongoDB Connected: ${conn.connection.host}`);
   } catch (error) {
     console.error("Database connection error:", error);
@@ -120,14 +128,13 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 5000;
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(
     `🚀 Server running in ${
       process.env.NODE_ENV || "development"
     } mode on port ${PORT}`
   );
-  console.log(`📍 API Base URL: http://localhost:${PORT}`);
-  console.log(`🔗 Health Check: http://localhost:${PORT}/api/health`);
+  console.log(`🔗 Health Check: /api/health`);
 });
 
 // Handle unhandled promise rejections

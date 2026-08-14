@@ -58,8 +58,10 @@ const UserSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+UserSchema.index({ role: 1 });
+
 // Encrypt password using bcrypt
-UserSchema.pre("save", async function (next) {
+UserSchema.pre("save", async function () {
   if (this.isModified("password")) {
     const salt = await bcrypt.genSalt(10);
     this.password = await bcrypt.hash(this.password, salt);
@@ -69,8 +71,6 @@ UserSchema.pre("save", async function (next) {
     const salt = await bcrypt.genSalt(10);
     this.tempPassword = await bcrypt.hash(this.tempPassword, salt);
   }
-
-  next();
 });
 
 // Match tempPassword method

@@ -6,6 +6,10 @@ const apiLimiter = rateLimit({
   max: 500, // Limit each IP to 500 requests per windowMs
   standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
   legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  skip: (req) => {
+    const url = req.originalUrl || req.url || "";
+    return url.includes("/r2proxy/") || url.includes("/video/part");
+  },
   message: {
     success: false,
     message: 'Too many requests from this IP, please try again after 15 minutes'
