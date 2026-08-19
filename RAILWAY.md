@@ -61,16 +61,32 @@ Railway injects `PORT`. Do not hardcode `5000` in production.
 
 Same Railway **project**, second service, same GitHub repo.
 
+**Do not let this service use `railway.toml`.** That file builds `Dockerfile` and starts `node server.js` (the API). If the worker logs show `🚀 Server running` and `Health Check: /api/health`, it is running the API, not the encoder.
+
 1. **New service** → **GitHub repo** → same repository.
-2. **Settings → Build**
+2. **Settings → Config-as-code** → config file: `railway.video.toml`  
+   (or turn Config-as-code off and set the Dockerfile path below).
+3. **Settings → Build**
    - Builder: **Dockerfile**
    - Dockerfile path: `Dockerfile.video`
-3. **Settings → Resources**: at least **2 GB RAM**. Encoding 1080p HLS needs it.
-4. Copy the same `MONGO_URI` and R2 variables as the API.
-5. Set `VIDEO_PROCESS_IN_API=false`.
-6. The worker **does not need a public domain**. It polls Mongo for `queued` videos.
+4. **Settings → Deploy**
+   - Health check path: `/health` (not `/api/health`)
+   - Custom start command: leave empty (`Dockerfile.video` already runs `node workers/videoProcessor.js`)
+5. **Settings → Resources**: at least **2 GB RAM**. Encoding 1080p HLS needs it.
+6. Copy the same `MONGO_URI` and R2 variables as the API.
+7. Set `VIDEO_PROCESS_IN_API=false`.
+8. The worker **does not need a public domain**. It polls Mongo for `queued` videos.
 
-Worker health (only if you expose it): `GET /health`.
+Worker logs should look like:
+
+```
+[video-worker] CONNECTED  MongoDB  ...
+[video-worker] listening on :8080
+[video-worker] polling Mongo every 4000ms
+[video-worker] ▶️ Job ...
+```
+
+If you still see `🚀 Server running` / `/api/health`, the worker is on the wrong Dockerfile.
 
 ---
 
