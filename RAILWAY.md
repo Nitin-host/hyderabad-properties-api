@@ -110,6 +110,7 @@ Set these on the **API** service. Never commit `.env`.
 | `FRONTEND_URL` | Extra allowed CORS origin |
 | `VIDEO_WORKER_SECRET` | Shared secret if you call the worker HTTP API |
 | `VIDEO_WORKER_POLL_MS` | Default `4000` |
+| `VIDEO_WORKER_URL` | Worker base URL so the API can print `CONNECTED`. Docker Compose: `http://video-worker:5100`. Railway: `http://${{ "Video Worker docker".RAILWAY_PRIVATE_DOMAIN }}:${{ "Video Worker docker".PORT }}` |
 | `EMAIL_HOST` / `EMAIL_PORT` / `EMAIL_USER` / `EMAIL_PASS` | Unused if Brevo is configured |
 
 ---
@@ -124,6 +125,7 @@ Copy from the API:
 - `R2_SECRET_ACCESS_KEY`
 - `R2_BUCKET_NAME`
 - `VIDEO_PROCESS_IN_API=false`
+- `API_URL` — API base URL so the worker can print `CONNECTED`. Docker Compose: `http://api:5000`. Railway: `http://${{hyderabad-properties-api.RAILWAY_PRIVATE_DOMAIN}}:${{hyderabad-properties-api.PORT}}`
 
 Railway sets `PORT` on this service too. The worker listens on `PORT` (falls back to `5100` locally).
 
@@ -200,6 +202,7 @@ Rebuild/redeploy the frontend after changing `VITE_API_BASE_URL`.
 |---|---|---|
 | API | `docker compose up` or `npm run dev` | `Dockerfile` |
 | Worker | `Dockerfile.video` / `npm run worker` | second service, `Dockerfile.video` |
+| Handshake | Compose sets `VIDEO_WORKER_URL` + `API_URL`; logs `[connect] CONNECTED` | Set both private service URLs to get the same connect log |
 | Mongo | local or Atlas | Atlas only |
 | `CLIENT_URL` | `http://localhost:5173` | production frontend origin |
 | `PORT` | `5000` | injected by Railway |

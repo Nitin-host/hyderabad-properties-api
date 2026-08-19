@@ -28,6 +28,18 @@ const {
 const isRailway = !!process.env.RAILWAY_ENVIRONMENT;
 const TEMP_BASE = isRailway ? "/tmp" : os.tmpdir();
 
+function log(...args) {
+  console.log("[video-worker]", ...args);
+}
+
+function warn(...args) {
+  console.warn("[video-worker]", ...args);
+}
+
+function error(...args) {
+  console.error("[video-worker]", ...args);
+}
+
 // --- Utility: sanitize filenames for R2 keys ---
 function sanitizeKey(key) {
   return key ? key.replace(/[&<>"'`\\?%{}|^~[\] ]/g, "_") : "";
@@ -115,7 +127,7 @@ function deleteFolderRecursive(folderPath) {
     try {
       fs.rmdirSync(folderPath);
     } catch (err) {
-      console.warn("⚠️ Failed to remove folder:", folderPath, err.message);
+      warn("⚠️ Failed to remove folder:", folderPath, err.message);
     }
   }
 }
@@ -139,11 +151,11 @@ async function processVideoJob(job = {}) {
   const hlsOutputDir = path.join(TEMP_BASE, `hls-${propertyId}`);
   deleteFolderRecursive(hlsOutputDir);
 
-  console.log(
+  log(
     `🎥 Worker started for property: ${propertyId}, file: ${originalName}`
   );
-  if (sourceKey) console.log("Source R2 key:", sourceKey);
-  else console.log("Resolved tempPath:", tempPath);
+  if (sourceKey) log("Source R2 key:", sourceKey);
+  else log("Resolved tempPath:", tempPath);
 
   let finalVideoPath = tempPath;
   let thumbnailPath = null;
@@ -152,9 +164,9 @@ async function processVideoJob(job = {}) {
 
   try {
     if (sourceKey) {
-      console.log("⬇️ Downloading source video from R2...");
+      log("⬇️ Downloading source video from R2...");
       await downloadObjectToFile(sourceKey, tempPath);
-      console.log("✅ Source downloaded:", tempPath);
+      log("✅ Source downloaded:", tempPath);
     }
 
     if (!fs.existsSync(tempPath)) {
@@ -164,16 +176,16 @@ async function processVideoJob(job = {}) {
     // 1️⃣ Convert to MP4 if needed
     const ext = path.extname(originalName).toLowerCase();
     if (ext !== ".mp4") {
-      console.log("🔄 Converting non-MP4 video to MP4...");
+      log("🔄 Converting non-MP4 video to MP4...");
       const { outputPath, finalName } = await convertToMp4(
         tempPath,
         originalName,
         { deleteOriginal: false }
       );
       finalVideoPath = outputPath;
-      console.log("✅ Converted to MP4:", finalName);
+      log("✅ Converted to MP4:", finalName);
     } else {
-      console.log("🎞️ Video already in MP4 format — skipping conversion.");
+      log("🎞️ Video already in MP4 format — skipping conversion.");
     }
 
     // 2️⃣ Determine dynamic HLS segment duration
@@ -187,11 +199,11 @@ async function processVideoJob(job = {}) {
       if (duration > 600) hlsSegmentDuration = 12;
       else if (duration > 300) hlsSegmentDuration = 10;
       else if (duration > 60) hlsSegmentDuration = 8;
-      console.log(
+      log(
         `⏱️ Duration: ${duration.toFixed(1)}s — ${hlsSegmentDuration}s segments`
       );
     } catch (err) {
-      console.warn("⚠️ Could not determine video duration:", err.message);
+      warn("⚠️ Could not determine video duration:", err.message);
     }
 
     let hasAudio = true;
@@ -206,7 +218,7 @@ async function processVideoJob(job = {}) {
     }
 
     await ensureDir(hlsOutputDir);
-    console.log("🎬 Generating HLS variants sequentially (480p → 720p → 1080p)...");
+    log("🎬 Generating HLS variants sequentially (480p → 720p → 1080p)...");
 
     await encodeHlsVariant({
       input: finalVideoPath,
@@ -221,7 +233,7 @@ async function processVideoJob(job = {}) {
       segmentDuration: hlsSegmentDuration,
       hasAudio,
     });
-    console.log("✅ 480p ready");
+    log("✅ 480p ready");
 
     await encodeHlsVariant({
       input: finalVideoPath,
@@ -236,7 +248,7 @@ async function processVideoJob(job = {}) {
       segmentDuration: hlsSegmentDuration,
       hasAudio,
     });
-    console.log("✅ 720p ready");
+    log("✅ 720p ready");
 
     const Property = require("../models/Property");
     const live = await Property.findById(propertyId).select("isDeleted").lean();
@@ -260,7 +272,7 @@ async function processVideoJob(job = {}) {
       segmentDuration: hlsSegmentDuration,
       hasAudio,
     });
-    console.log("✅ 1080p ready");
+    log("✅ 1080p ready");
 
     // 4️⃣ Create master playlist
     const masterPlaylist = `#EXTM3U
@@ -274,11 +286,11 @@ async function processVideoJob(job = {}) {
     fs.writeFileSync(path.join(hlsOutputDir, "master.m3u8"), masterPlaylist);
 
     // 5️⃣ Thumbnail + upload
-    console.log("🖼️ Generating thumbnail...");
+    log("🖼️ Generating thumbnail...");
     thumbnailPath = await generateVideoThumbnail(finalVideoPath);
-    console.log("✅ Thumbnail created:", thumbnailPath);
+    log("✅ Thumbnail created:", thumbnailPath);
 
-    console.log("☁️ Uploading to R2...");
+    log("☁️ Uploading to R2...");
     const files = fs.readdirSync(hlsOutputDir);
     const uploadLimit = 4;
     let uploadIndex = 0;
@@ -318,9 +330,9 @@ async function processVideoJob(job = {}) {
     }
 
     uploadCompleted = true;
-    console.log("✅ Upload complete.");
+    log("✅ Upload complete.");
   } catch (err) {
-    console.error("❌ Worker failed:", err.message);
+    error("❌ Worker failed:", err.message);
     for (const key of uploadedKeys) {
       try {
         await deleteFile(key);
@@ -328,12 +340,12 @@ async function processVideoJob(job = {}) {
     }
     return { success: false, error: err.message };
   } finally {
-    console.log("🧹 Cleaning up temp files...");
+    log("🧹 Cleaning up temp files...");
     deleteFolderRecursive(hlsOutputDir);
     safeDeleteSync(thumbnailPath);
     safeDeleteSync(tempPath);
     if (finalVideoPath !== tempPath) safeDeleteSync(finalVideoPath);
-    console.log("✅ Cleanup complete.");
+    log("✅ Cleanup complete.");
   }
 
   return {
