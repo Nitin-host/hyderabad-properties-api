@@ -141,7 +141,7 @@ async function claimNextJob(propertyId) {
   return Property.findOneAndUpdate(
     filter,
     { $set: { "videos.$.videoStatus": "processing" } },
-    { new: true }
+    { returnDocument: "after" }
   );
 }
 
@@ -163,6 +163,7 @@ async function markResult(propertyId, result) {
     if (result.sourceKey) {
       try {
         await deleteFile(result.sourceKey);
+        log(`🧹 Deleted raw source from R2: ${result.sourceKey}`);
       } catch (err) {
         warn(`Failed to delete source video: ${err.message}`);
       }

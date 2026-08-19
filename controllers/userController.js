@@ -302,7 +302,7 @@ exports.updateProfile = async (req, res) => {
     const user = await User.findByIdAndUpdate(
       req.user.id,
       { name, phone },
-      { new: true, runValidators: true }
+      { returnDocument: "after", runValidators: true }
     );
 
     res.status(200).json({
@@ -461,7 +461,7 @@ exports.updateUserRole = async (req, res) => {
     const user = await User.findByIdAndUpdate(
       id,
       { role },
-      { new: true, runValidators: true }
+      { returnDocument: "after", runValidators: true }
     ).select('-password');
 
     if (!user) {
@@ -759,7 +759,7 @@ exports.addToWishlist = async (req, res) => {
     const user = await User.findByIdAndUpdate(
       req.user._id,
       { $addToSet: { wishlist: propertyId } },
-      { new: true }
+      { returnDocument: "after" }
     ).select("wishlist");
 
     if (!user) return res.status(404).json({ message: "User not found" });
@@ -782,7 +782,7 @@ exports.removeFromWishlist = async (req, res) => {
     const user = await User.findByIdAndUpdate(
       req.user._id,
       { $pull: { wishlist: propertyId } },
-      { new: true }
+      { returnDocument: "after" }
     ).select("wishlist");
 
     if (!user) return res.status(404).json({ message: "User not found" });

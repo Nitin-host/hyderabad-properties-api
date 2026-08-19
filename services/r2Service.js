@@ -253,6 +253,41 @@ async function uploadPart({ key, uploadId, partNumber, body }) {
   return { etag: result.ETag, partNumber };
 }
 
+async function presignUploadPart({
+  key,
+  uploadId,
+  partNumber,
+  expiresIn = 7200,
+}) {
+  const command = new UploadPartCommand({
+    Bucket: R2_BUCKET,
+    Key: key,
+    UploadId: uploadId,
+    PartNumber: partNumber,
+  });
+  const url = await getSignedUrl(r2, command, { expiresIn });
+  return { partNumber, url };
+}
+
+async function presignUploadParts({
+  key,
+  uploadId,
+  partCount,
+  expiresIn = 7200,
+}) {
+  const parts = await Promise.all(
+    Array.from({ length: partCount }, (_, i) =>
+      presignUploadPart({
+        key,
+        uploadId,
+        partNumber: i + 1,
+        expiresIn,
+      })
+    )
+  );
+  return parts;
+}
+
 async function completeMultipartUpload({ key, uploadId, parts }) {
   const command = new CompleteMultipartUploadCommand({
     Bucket: R2_BUCKET,
@@ -305,6 +340,8 @@ module.exports = {
   deletePropertyMedia,
   createMultipartUpload,
   uploadPart,
+  presignUploadPart,
+  presignUploadParts,
   completeMultipartUpload,
   abortMultipartUpload,
   downloadObjectToFile,
