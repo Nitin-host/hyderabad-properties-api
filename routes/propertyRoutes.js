@@ -10,6 +10,7 @@ const {
   uploadPropertyVideos,
   upload,
   chunkUpload,
+  handleChunkUploadError,
   getAdminProperties,
   getDeletedProperties,
   permanentDelete,
@@ -68,6 +69,7 @@ router.put(
   authorize('admin', 'super_admin'),
   validatePropertyId,
   chunkUpload.single('chunk'),
+  handleChunkUploadError,
   uploadVideoChunk
 );
 router.post('/:id/video/complete', protect, authorize('admin', 'super_admin'), validatePropertyId, completeChunkedVideoUpload);

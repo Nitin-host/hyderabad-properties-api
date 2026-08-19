@@ -121,8 +121,18 @@ const upload = multer({
 
 const chunkUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 12 * 1024 * 1024 },
+  limits: { fileSize: 20 * 1024 * 1024 },
 });
+
+function handleChunkUploadError(err, req, res, next) {
+  if (err?.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({
+      success: false,
+      message: "File too large",
+    });
+  }
+  return next(err);
+}
 
 // Utility to remove empty string fields recursively
 function removeEmptyStrings(obj) {
@@ -1321,7 +1331,7 @@ const permanentDelete = async (req, res) => {
 const initiateChunkedVideoUpload = async (req, res) => {
   try {
     const propertyId = req.params.id;
-    const { fileName, contentType, fileSize } = req.body || {};
+    const { fileName, contentType, fileSize, viaApi } = req.body || {};
 
     if (!fileName) {
       return res.status(400).json({
@@ -1359,20 +1369,23 @@ const initiateChunkedVideoUpload = async (req, res) => {
       contentType || "video/mp4"
     );
 
-    const partSize = pickVideoPartSize(fileSize);
+    const useApiParts = viaApi === true || viaApi === "true";
+    const partSize = useApiParts ? VIDEO_PART_SIZE : pickVideoPartSize(fileSize);
     const partCount = Math.min(
       200,
       Math.max(1, Math.ceil(Number(fileSize || 1) / partSize))
     );
     let partUrls = [];
-    try {
-      partUrls = await presignUploadParts({
-        key,
-        uploadId,
-        partCount,
-      });
-    } catch (err) {
-      console.warn("Failed to presign R2 part URLs:", err.message);
+    if (!useApiParts) {
+      try {
+        partUrls = await presignUploadParts({
+          key,
+          uploadId,
+          partCount,
+        });
+      } catch (err) {
+        console.warn("Failed to presign R2 part URLs:", err.message);
+      }
     }
 
     try {
@@ -1998,6 +2011,7 @@ module.exports = {
   checkVideoStatus,
   upload,
   chunkUpload,
+  handleChunkUploadError,
   getPropertyBySlug,
   initiateChunkedVideoUpload,
   uploadVideoChunk,
