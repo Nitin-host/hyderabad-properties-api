@@ -139,7 +139,7 @@ router.put(
           deletedBy: null,
           deletedAt: null,
         },
-        { new: true, runValidators: true }
+        { returnDocument: "after", runValidators: true }
       ).populate("agent", "name email phone");
 
       if (!property) {

@@ -12,6 +12,7 @@ const {
   uploadPart,
   completeMultipartUpload,
   abortMultipartUpload,
+  presignUploadParts,
 } = require("../services/r2Service");
 const multer = require("multer");
 const path = require("path");
@@ -29,6 +30,13 @@ const LIST_SELECT =
   "title price location landmarks bedrooms bathrooms size sizeUnit parking amenities status images slug furnished propertyType createdAt";
 
 const VIDEO_PART_SIZE = 8 * 1024 * 1024;
+
+function pickVideoPartSize(fileSize) {
+  const size = Number(fileSize) || 0;
+  if (size > 400 * 1024 * 1024) return 32 * 1024 * 1024;
+  if (size > 50 * 1024 * 1024) return 16 * 1024 * 1024;
+  return VIDEO_PART_SIZE;
+}
 
 function shouldProcessVideoInApi() {
   return process.env.VIDEO_PROCESS_IN_API === "true";
@@ -750,7 +758,7 @@ const updateProperty = async (req, res) => {
     const updatedProperty = await Property.findByIdAndUpdate(
       propertyId,
       { $set: updateSet },
-      { new: true }
+      { returnDocument: "after" }
     );
 
     // ✅ Respond early — videos will finish later
@@ -1313,7 +1321,7 @@ const permanentDelete = async (req, res) => {
 const initiateChunkedVideoUpload = async (req, res) => {
   try {
     const propertyId = req.params.id;
-    const { fileName, contentType } = req.body || {};
+    const { fileName, contentType, fileSize } = req.body || {};
 
     if (!fileName) {
       return res.status(400).json({
@@ -1351,6 +1359,22 @@ const initiateChunkedVideoUpload = async (req, res) => {
       contentType || "video/mp4"
     );
 
+    const partSize = pickVideoPartSize(fileSize);
+    const partCount = Math.min(
+      200,
+      Math.max(1, Math.ceil(Number(fileSize || 1) / partSize))
+    );
+    let partUrls = [];
+    try {
+      partUrls = await presignUploadParts({
+        key,
+        uploadId,
+        partCount,
+      });
+    } catch (err) {
+      console.warn("Failed to presign R2 part URLs:", err.message);
+    }
+
     try {
       await Property.findByIdAndUpdate(propertyId, {
         videos: [{ videoStatus: "uploading" }],
@@ -1365,7 +1389,10 @@ const initiateChunkedVideoUpload = async (req, res) => {
       data: {
         uploadId,
         key,
-        partSize: VIDEO_PART_SIZE,
+        partSize,
+        partCount,
+        directUpload: partUrls.length > 0,
+        partUrls,
       },
     });
   } catch (error) {

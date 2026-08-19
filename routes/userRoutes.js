@@ -107,7 +107,7 @@ router.put('/:id', ownerOrAdmin, validateUpdateProfile, async (req, res) => {
     const user = await User.findByIdAndUpdate(
       req.params.id,
       { name, phone },
-      { new: true, runValidators: true }
+      { returnDocument: "after", runValidators: true }
     ).select('-password');
 
     if (!user) {
