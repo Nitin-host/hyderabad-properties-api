@@ -6,6 +6,7 @@ const compression = require("compression");
 // const apicache = require('apicache');
 // const logger = require('./services/loggerService');
 const { apiLimiter, authLimiter } = require("./middleware/rateLimiter");
+const { startPeerWatch } = require("./services/serviceConnect");
 
 // Load env vars
 dotenv.config();
@@ -66,6 +67,13 @@ const connectDB = async () => {
   }
 };
 
+const VIDEO_WORKER_URL = process.env.VIDEO_WORKER_URL || "";
+let workerPeer = {
+  name: "video-worker",
+  url: VIDEO_WORKER_URL,
+  connected: false,
+};
+
 // Connect to database
 connectDB();
 
@@ -77,6 +85,12 @@ app.get("/api/health", (req, res) => {
     timestamp: new Date(),
     environment: process.env.NODE_ENV || "development",
     uptime: process.uptime(),
+    worker: {
+      url: workerPeer.url || null,
+      connected: Boolean(workerPeer.connected),
+      connectedAt: workerPeer.connectedAt || null,
+      lastError: workerPeer.lastError || null,
+    },
   });
 });
 
@@ -127,14 +141,24 @@ app.use((req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
+const LISTEN_HOST = process.env.RAILWAY_ENVIRONMENT ? "::" : "0.0.0.0";
 
-const server = app.listen(PORT, "0.0.0.0", () => {
+const server = app.listen(PORT, LISTEN_HOST, () => {
   console.log(
     `🚀 Server running in ${
       process.env.NODE_ENV || "development"
     } mode on port ${PORT}`
   );
   console.log(`🔗 Health Check: /api/health`);
+  workerPeer = startPeerWatch({
+    from: "api",
+    name: "video-worker",
+    url: VIDEO_WORKER_URL,
+    healthPath: "/health",
+    onChange: (status) => {
+      workerPeer = status;
+    },
+  });
 });
 
 // Handle unhandled promise rejections

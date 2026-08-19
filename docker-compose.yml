@@ -9,6 +9,20 @@ services:
       - .env
     environment:
       VIDEO_PROCESS_IN_API: "false"
+      VIDEO_WORKER_URL: "http://video-worker:5100"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:5000/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
 
   video-worker:
     build:
@@ -20,4 +34,19 @@ services:
       - .env
     environment:
       NODE_OPTIONS: "--max-old-space-size=384"
+      PORT: "5100"
       VIDEO_WORKER_PORT: "5100"
+      API_URL: "http://api:5000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:5100/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped

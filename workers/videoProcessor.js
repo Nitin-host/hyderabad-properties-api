@@ -3,15 +3,34 @@ const express = require("express");
 const mongoose = require("mongoose");
 const Property = require("../models/Property");
 const { deleteFile, deletePropertyMedia } = require("../services/r2Service");
+const { startPeerWatch } = require("../services/serviceConnect");
 const { processVideoJob } = require("./videoWorker");
 
 const POLL_MS = Number(process.env.VIDEO_WORKER_POLL_MS) || 4000;
 const PORT = Number(process.env.PORT || process.env.VIDEO_WORKER_PORT || 5100);
 const SECRET = process.env.VIDEO_WORKER_SECRET || "";
+const API_URL = process.env.API_URL || "";
 
 let lastJob = null;
 let workChain = Promise.resolve();
 let pendingCount = 0;
+let apiPeer = {
+  name: "api",
+  url: API_URL,
+  connected: false,
+};
+
+function log(message) {
+  console.log(`[video-worker] ${message}`);
+}
+
+function warn(message) {
+  console.warn(`[video-worker] ${message}`);
+}
+
+function error(message) {
+  console.error(`[video-worker] ${message}`);
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -99,7 +118,7 @@ async function recoverStuckJobs() {
   );
 
   if (reset.modifiedCount || lost.modifiedCount) {
-    console.log(
+    log(
       `Recovered stuck jobs: requeued=${reset.modifiedCount || 0}, failed=${lost.modifiedCount || 0}`
     );
   }
@@ -145,7 +164,7 @@ async function markResult(propertyId, result) {
       try {
         await deleteFile(result.sourceKey);
       } catch (err) {
-        console.warn("Failed to delete source video:", err.message);
+        warn(`Failed to delete source video: ${err.message}`);
       }
     }
     return;
@@ -175,7 +194,7 @@ async function runClaimedJob(property) {
     status: "processing",
   };
 
-  console.log(`▶️ Job ${propertyId}: ${lastJob.originalName}`);
+  log(`▶️ Job ${propertyId}: ${lastJob.originalName}`);
   let result;
   try {
     result = await processVideoJob({
@@ -193,7 +212,7 @@ async function runClaimedJob(property) {
       .lean();
     if (!stillThere || stillThere.isDeleted) {
       await deletePropertyMedia(propertyId).catch((err) =>
-        console.warn("Failed to purge media after deleted encode:", err.message)
+        warn(`Failed to purge media after deleted encode: ${err.message}`)
       );
       lastJob = {
         ...lastJob,
@@ -217,7 +236,7 @@ async function runClaimedJob(property) {
     qualityKeys: result.qualityKeys || null,
   };
 
-  console.log(
+  log(
     result.success
       ? `✅ Uploaded HLS back for ${propertyId}`
       : `❌ Failed ${propertyId}: ${result.error}`
@@ -236,7 +255,7 @@ async function pollLoop() {
         }
       }
     } catch (err) {
-      console.error("Worker loop error:", err.message);
+      error(`Worker loop error: ${err.message}`);
     }
     await sleep(POLL_MS);
   }
@@ -247,9 +266,9 @@ async function start() {
     throw new Error("MONGO_URI is required for the video worker");
   }
 
-  await mongoose.connect(process.env.MONGO_URI);
+  const conn = await mongoose.connect(process.env.MONGO_URI);
+  log(`CONNECTED  MongoDB  ${conn.connection.host}`);
   await recoverStuckJobs();
-  console.log("🎬 Video job worker connected");
 
   const app = express();
   app.use(express.json());
@@ -261,6 +280,12 @@ async function start() {
       busy: isBusy(),
       lastJob,
       qualities: ["480p", "720p", "1080p"],
+      api: {
+        url: apiPeer.url || null,
+        connected: Boolean(apiPeer.connected),
+        connectedAt: apiPeer.connectedAt || null,
+        lastError: apiPeer.lastError || null,
+      },
     });
   });
 
@@ -293,14 +318,25 @@ async function start() {
     });
   });
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Video job API listening on :${PORT}`);
+  const LISTEN_HOST = process.env.RAILWAY_ENVIRONMENT ? "::" : "0.0.0.0";
+  app.listen(PORT, LISTEN_HOST, () => {
+    log(`listening on :${PORT}`);
+    apiPeer = startPeerWatch({
+      from: "video-worker",
+      name: "api",
+      url: API_URL,
+      healthPath: "/api/health",
+      onChange: (status) => {
+        apiPeer = status;
+      },
+    });
   });
 
+  log(`polling Mongo every ${POLL_MS}ms`);
   pollLoop();
 }
 
 start().catch((err) => {
-  console.error("Video worker failed to start:", err);
+  error(`failed to start: ${err.message}`);
   process.exit(1);
 });

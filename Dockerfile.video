@@ -20,6 +20,7 @@ COPY --from=deps /usr/src/app/node_modules ./node_modules
 COPY package*.json ./
 COPY workers ./workers
 COPY services/r2Service.js ./services/r2Service.js
+COPY services/serviceConnect.js ./services/serviceConnect.js
 COPY services/FfmpegHelper.js ./services/FfmpegHelper.js
 COPY services/VideoConvertor.js ./services/VideoConvertor.js
 COPY services/generateVideoThumbnail.js ./services/generateVideoThumbnail.js
